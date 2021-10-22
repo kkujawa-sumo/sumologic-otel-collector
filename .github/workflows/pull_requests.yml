@@ -32,7 +32,14 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2.3.5
+      - name: Check if test related files changed
+        id: changed-files
+        uses: tj-actions/changed-files@v10
+        with:
+          files: |
+            \.md$
       - uses: gaurav-nelson/github-action-markdown-link-check@v1
+        if: steps.changed-files.outputs.any_changed == 'true'
         with:
           config-file: '.markdown_link_check.json'
 
@@ -88,8 +95,11 @@ jobs:
         uses: tj-actions/changed-files@v10
         with:
           files: |
-            pkg/
+            go.mod
+            go.sum
+            \.(go|yaml|yml)$
             Makefile
+            Makefile.common
 
       - name: Setup go
         if: steps.changed-files.outputs.any_changed == 'true'
@@ -133,8 +143,11 @@ jobs:
         uses: tj-actions/changed-files@v10
         with:
           files: |
-            otelcolbuilder/cmd/
-            pkg/
+            go.mod
+            go.sum
+            \.(go|yaml|yml)$
+            Makefile
+            Makefile.common
 
       - name: Setup go
         if: steps.changed-files.outputs.any_changed == 'true'
@@ -189,12 +202,12 @@ jobs:
         uses: tj-actions/changed-files@v10
         with:
           files: |
-            otelcolbuilder/.otelcol-builder.yaml
-            otelcolbuilder/Makefile
-            otelcolbuilder/cmd/
-            pkg/
-            Dockerfile.*
+            go.mod
+            go.sum
+            \.(go|yaml|yml)$
             Makefile
+            Makefile.common
+            Dockerfile.*
 
       - name: Setup go
         if: steps.changed-files.outputs.any_changed == 'true'
@@ -267,12 +280,12 @@ jobs:
         uses: tj-actions/changed-files@v10
         with:
           files: |
-            otelcolbuilder/.otelcol-builder.yaml
-            otelcolbuilder/Makefile
-            otelcolbuilder/cmd/
-            pkg/
-            Dockerfile.*
+            go.mod
+            go.sum
+            \.(go|yaml|yml)$
             Makefile
+            Makefile.common
+            Dockerfile.*
 
       - name: Set up QEMU
         if: steps.changed-files.outputs.any_changed == 'true'
