@@ -15,6 +15,8 @@
 package k8sprocessor
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -47,10 +49,13 @@ func newFakeClient(
 	rules kube.ExtractionRules,
 	filters kube.Filters,
 	associations []kube.Association,
+	exclude kube.Excludes,
 	_ kube.APIClientsetProvider,
 	_ kube.InformerProvider,
 	_ kube.OwnerProvider,
 	_ string,
+	_ time.Duration,
+	_ time.Duration,
 ) (kube.Client, error) {
 	cs := fake.NewSimpleClientset()
 
@@ -65,11 +70,12 @@ func newFakeClient(
 	}, nil
 }
 
-// GetPod looks up FakeClient.Pods map by the provided string,
-// which might represent either IP address or Pod UID.
-func (f *fakeClient) GetPod(identifier kube.PodIdentifier) (*kube.Pod, bool) {
+func (f *fakeClient) GetPodAttributes(identifier kube.PodIdentifier) (map[string]string, bool) {
 	p, ok := f.Pods[identifier]
-	return p, ok
+	if !ok {
+		return map[string]string{}, ok
+	}
+	return p.Attributes, ok
 }
 
 // Start is a noop for FakeClient.

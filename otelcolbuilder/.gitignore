@@ -1,3 +1,12 @@
 cmd/*
 !cmd/collector_config_test.go
+!cmd/collector_windows.go
 !cmd/testdata/
+!cmd/configprovider.go
+!cmd/main.go.patch
+!cmd/fips.go
+!cmd/flags.go
+
+# FIPS Static
+musl-cross-make
+toolchain_*

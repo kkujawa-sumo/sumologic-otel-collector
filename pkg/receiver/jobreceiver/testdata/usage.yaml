@@ -1,0 +1,100 @@
+receivers:
+  monitoringjob/log:
+    schedule:
+      interval: 1m
+    exec:
+      command: /bin/sh
+      timeout: 1m
+      arguments:
+        - '-c'
+        - 'for i in {0..120}; do echo -n "werning: " && date -Iseconds --date "90 seconds ago" && sleep 1 && echo "multi line $(head -c 12 /dev/urandom | base64)"; done;'
+    output:
+      type: log_entries
+      log_entries:
+        include_command_name: true
+        include_stream_name: true
+        max_log_size: '16kb'
+        encoding: 'utf-8'
+        multiline:
+          line_start_pattern: '\w+:.*'
+      attributes:
+        type: log
+      resource:
+        bingo: bango
+      operators:
+        - type: regex_parser
+          parse_from: body
+          regex: '^(?P<level>\w+):\s+(?P<ts>.*)'
+        - type: severity_parser
+          parse_from: attributes.level
+          mapping:
+            error: errrrer
+            warn:
+              - werning
+              - nonsense
+              - 'w.a.r.n.'
+        - type: time_parser
+          parse_from: attributes.ts
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05-07:00'
+
+  monitoringjob/event:
+    schedule:
+      interval: 10s
+    exec:
+      command: 'sh'
+      arguments:
+        - '-c'
+        - 'check_swap -w 50% -c 20%'
+      timeout: 1m
+      runtime_assets:
+        - name: 'monitoring-plugins'
+          url: 'https://assets.bonsai.sensu.io/a6f7661349ed5181a0542131dff05f0cd328f02f/monitoring-plugins-centos8_2.10.5_linux_amd64.tar.gz'
+          sha512: '4767447bf56febc81510c7da3466428f2b4ecb53462d741bbdc5bb02b543e015662a573da95c8c5428b3008a362a9f69f88cc234e1ea2625692e3e4e9e9b39d4'
+    output:
+      type: event
+      event:
+        include_command_name: true
+        include_command_status: true
+        include_command_duration: true
+        max_body_size: 4096
+      attributes:
+        type: event
+      resource:
+        bingo: bango
+
+
+exporters:
+  debug:
+    verbosity: detailed
+    sampling_initial: 32
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+  batch:
+    send_batch_size: 1_024
+    timeout: 1s
+
+  resourcedetection/system:
+    detectors: ["system"]
+    system:
+      hostname_sources: ["dns","os"]
+
+service:
+  pipelines:
+    logs/monitoringjob:
+      receivers:
+        - monitoringjob/event
+        - monitoringjob/log
+      processors:
+        - memory_limiter
+        - batch
+        - resourcedetection/system
+      exporters:
+        - debug
+  telemetry:
+    logs:
+      level: debug

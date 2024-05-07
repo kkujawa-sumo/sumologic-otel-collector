@@ -22,13 +22,14 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/processor"
 )
 
 func TestCreateDefaultConfig(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
 	assert.NotNil(t, cfg, "failed to create default config")
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, component.ValidateConfig(cfg))
 }
 
 func TestCreateProcessor(t *testing.T) {
@@ -38,7 +39,7 @@ func TestCreateProcessor(t *testing.T) {
 	kubeClientProvider = newFakeClient
 
 	cfg := factory.CreateDefaultConfig()
-	params := component.ProcessorCreateSettings{
+	params := processor.CreateSettings{
 		TelemetrySettings: componenttest.NewNopTelemetrySettings(),
 	}
 

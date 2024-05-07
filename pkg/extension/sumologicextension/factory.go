@@ -16,13 +16,12 @@ package sumologicextension
 
 import (
 	"context"
-	"os"
-	"path"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v4"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/extension/extensionhelper"
+	"go.opentelemetry.io/collector/extension"
+
+	"github.com/SumoLogic/sumologic-otel-collector/pkg/extension/sumologicextension/credentials"
 )
 
 const (
@@ -31,30 +30,34 @@ const (
 	DefaultApiBaseUrl = "https://open-collectors.sumologic.com"
 )
 
+var Type = component.MustNewType(typeStr)
+
 // NewFactory creates a factory for Sumo Logic extension.
-func NewFactory() component.ExtensionFactory {
-	return extensionhelper.NewFactory(
-		typeStr,
+func NewFactory() extension.Factory {
+	return extension.NewFactory(
+		Type,
 		createDefaultConfig,
 		createExtension,
+		component.StabilityLevelBeta,
 	)
 }
 
-func createDefaultConfig() config.Extension {
-	homePath, err := os.UserHomeDir()
+func createDefaultConfig() component.Config {
+	defaultCredsPath, err := credentials.GetDefaultCollectorCredentialsDirectory()
 	if err != nil {
 		return nil
 	}
-	defaultCredsPath := path.Join(homePath, collectorCredentialsDirectory)
 
 	return &Config{
-		ExtensionSettings:             config.NewExtensionSettings(config.NewComponentID(typeStr)),
 		ApiBaseUrl:                    DefaultApiBaseUrl,
 		HeartBeatInterval:             DefaultHeartbeatInterval,
 		CollectorCredentialsDirectory: defaultCredsPath,
 		Clobber:                       false,
+		DiscoverCollectorTags:         true,
+		ForceRegistration:             false,
 		Ephemeral:                     false,
 		TimeZone:                      "",
+		StickySessionEnabled:          false,
 		BackOff: backOffConfig{
 			InitialInterval: backoff.DefaultInitialInterval,
 			MaxInterval:     backoff.DefaultMaxInterval,
@@ -63,7 +66,7 @@ func createDefaultConfig() config.Extension {
 	}
 }
 
-func createExtension(_ context.Context, params component.ExtensionCreateSettings, cfg config.Extension) (component.Extension, error) {
+func createExtension(_ context.Context, params extension.CreateSettings, cfg component.Config) (extension.Extension, error) {
 	config := cfg.(*Config)
-	return newSumologicExtension(config, params.Logger)
+	return newSumologicExtension(config, params.Logger, params.ID, params.BuildInfo.Version)
 }

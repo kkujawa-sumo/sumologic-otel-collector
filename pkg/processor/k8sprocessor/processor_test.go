@@ -26,22 +26,25 @@ import (
 	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.opentelemetry.io/collector/model/pdata"
-	conventions "go.opentelemetry.io/collector/model/semconv/v1.5.0"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/processor"
+	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sprocessor/kube"
 )
 
-func newTracesProcessor(cfg config.Processor, next consumer.Traces, options ...Option) (component.TracesProcessor, error) {
+func newTracesProcessor(cfg component.Config, next consumer.Traces, options ...Option) (processor.Traces, error) {
 	opts := append(options, withKubeClientProvider(newFakeClient))
 	return createTracesProcessorWithOptions(
 		context.Background(),
-		component.ProcessorCreateSettings{
+		processor.CreateSettings{
 			TelemetrySettings: componenttest.NewNopTelemetrySettings(),
 		},
 		cfg,
@@ -50,11 +53,11 @@ func newTracesProcessor(cfg config.Processor, next consumer.Traces, options ...O
 	)
 }
 
-func newMetricsProcessor(cfg config.Processor, nextMetricsConsumer consumer.Metrics, options ...Option) (component.MetricsProcessor, error) {
+func newMetricsProcessor(cfg component.Config, nextMetricsConsumer consumer.Metrics, options ...Option) (processor.Metrics, error) {
 	opts := append(options, withKubeClientProvider(newFakeClient))
 	return createMetricsProcessorWithOptions(
 		context.Background(),
-		component.ProcessorCreateSettings{
+		processor.CreateSettings{
 			TelemetrySettings: componenttest.NewNopTelemetrySettings(),
 		},
 		cfg,
@@ -63,11 +66,11 @@ func newMetricsProcessor(cfg config.Processor, nextMetricsConsumer consumer.Metr
 	)
 }
 
-func newLogsProcessor(cfg config.Processor, nextLogsConsumer consumer.Logs, options ...Option) (component.LogsProcessor, error) {
+func newLogsProcessor(cfg component.Config, nextLogsConsumer consumer.Logs, options ...Option) (processor.Logs, error) {
 	opts := append(options, withKubeClientProvider(newFakeClient))
 	return createLogsProcessorWithOptions(
 		context.Background(),
-		component.ProcessorCreateSettings{
+		processor.CreateSettings{
 			TelemetrySettings: componenttest.NewNopTelemetrySettings(),
 		},
 		cfg,
@@ -94,9 +97,9 @@ func withExtractKubernetesProcessorInto(kp **kubernetesprocessor) Option {
 type multiTest struct {
 	t *testing.T
 
-	tp component.TracesProcessor
-	mp component.MetricsProcessor
-	lp component.LogsProcessor
+	tp processor.Traces
+	mp processor.Metrics
+	lp processor.Logs
 
 	nextTrace   *consumertest.TracesSink
 	nextMetrics *consumertest.MetricsSink
@@ -109,7 +112,7 @@ type multiTest struct {
 
 func newMultiTest(
 	t *testing.T,
-	cfg config.Processor,
+	cfg component.Config,
 	errFunc func(err error),
 	options ...Option,
 ) *multiTest {
@@ -155,9 +158,9 @@ func newMultiTest(
 
 func (m *multiTest) testConsume(
 	ctx context.Context,
-	traces pdata.Traces,
-	metrics pdata.Metrics,
-	logs pdata.Logs,
+	traces ptrace.Traces,
+	metrics pmetric.Metrics,
+	logs plog.Logs,
 	errFunc func(err error),
 ) {
 	errs := []error{
@@ -197,7 +200,7 @@ func (m *multiTest) assertResourceAttributesLen(batchNo int, attrsLen int) {
 	assert.Equal(m.t, m.nextLogs.AllLogs()[batchNo].ResourceLogs().At(0).Resource().Attributes().Len(), attrsLen)
 }
 
-func (m *multiTest) assertResource(batchNum int, resourceFunc func(res pdata.Resource)) {
+func (m *multiTest) assertResource(batchNum int, resourceFunc func(res pcommon.Resource)) {
 	rss := m.nextTrace.AllTraces()[batchNum].ResourceSpans()
 	r := rss.At(0).Resource()
 
@@ -230,10 +233,13 @@ func TestProcessorBadClientProvider(t *testing.T) {
 		_ kube.ExtractionRules,
 		_ kube.Filters,
 		_ []kube.Association,
+		_ kube.Excludes,
 		_ kube.APIClientsetProvider,
 		_ kube.InformerProvider,
 		_ kube.OwnerProvider,
 		_ string,
+		_ time.Duration,
+		_ time.Duration,
 	) (kube.Client, error) {
 		return nil, fmt.Errorf("bad client error")
 	}
@@ -244,101 +250,121 @@ func TestProcessorBadClientProvider(t *testing.T) {
 	}, withKubeClientProvider(clientProvider))
 }
 
-type generateResourceFunc func(res pdata.Resource)
+type generateResourceFunc func(res pcommon.Resource)
 
-func generateTraces(resourceFunc ...generateResourceFunc) pdata.Traces {
-	t := pdata.NewTraces()
+func generateTraces(resourceFunc ...generateResourceFunc) ptrace.Traces {
+	t := ptrace.NewTraces()
 	rs := t.ResourceSpans().AppendEmpty()
 	for _, resFun := range resourceFunc {
 		res := rs.Resource()
 		resFun(res)
 	}
-	span := rs.InstrumentationLibrarySpans().AppendEmpty().Spans().AppendEmpty()
+	span := rs.ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	span.SetName("foobar")
 	return t
 }
 
-func generateMetrics(resourceFunc ...generateResourceFunc) pdata.Metrics {
-	m := pdata.NewMetrics()
+func generateMetrics(resourceFunc ...generateResourceFunc) pmetric.Metrics {
+	m := pmetric.NewMetrics()
 	ms := m.ResourceMetrics().AppendEmpty()
 	for _, resFun := range resourceFunc {
 		res := ms.Resource()
 		resFun(res)
 	}
-	metric := ms.InstrumentationLibraryMetrics().AppendEmpty().Metrics().AppendEmpty()
+	metric := ms.ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
 	metric.SetName("foobar")
 	return m
 }
 
-func generateLogs(resourceFunc ...generateResourceFunc) pdata.Logs {
-	l := pdata.NewLogs()
+func generateLogs(resourceFunc ...generateResourceFunc) plog.Logs {
+	l := plog.NewLogs()
 	ls := l.ResourceLogs().AppendEmpty()
 	for _, resFun := range resourceFunc {
 		res := ls.Resource()
 		resFun(res)
 	}
-	log := ls.InstrumentationLibraryLogs().AppendEmpty().Logs().AppendEmpty()
-	log.SetName("foobar")
+	ls.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
 	return l
 }
 
 func withPassthroughIP(passthroughIP string) generateResourceFunc {
-	return func(res pdata.Resource) {
-		res.Attributes().InsertString(k8sIPLabelName, passthroughIP)
+	return func(res pcommon.Resource) {
+		res.Attributes().PutStr(k8sIPLabelName, passthroughIP)
 	}
 }
 
 func withHostname(hostname string) generateResourceFunc {
-	return func(res pdata.Resource) {
-		res.Attributes().InsertString(conventions.AttributeHostName, hostname)
+	return func(res pcommon.Resource) {
+		res.Attributes().PutStr(conventions.AttributeHostName, hostname)
 	}
 }
 
 func withPodUID(uid string) generateResourceFunc {
-	return func(res pdata.Resource) {
-		res.Attributes().InsertString("k8s.pod.uid", uid)
+	return func(res pcommon.Resource) {
+		res.Attributes().PutStr("k8s.pod.uid", uid)
 	}
 }
 
 func withPodAndNamespace(pod string, namespace string) generateResourceFunc {
-	return func(res pdata.Resource) {
-		res.Attributes().InsertString("k8s.pod.name", pod)
-		res.Attributes().InsertString("k8s.namespace.name", namespace)
+	return func(res pcommon.Resource) {
+		res.Attributes().PutStr("k8s.pod.name", pod)
+		res.Attributes().PutStr("k8s.namespace.name", namespace)
 	}
 }
 
-func TestIPDetectionFromContext(t *testing.T) {
-	m := newMultiTest(t, NewFactory().CreateDefaultConfig(), nil)
+type strAddr string
 
-	addr, err := net.ResolveIPAddr("ip", "1.1.1.1")
-	require.NoError(t, err)
-	ctx := client.NewContext(context.Background(),
-		client.Info{
+func (s strAddr) String() string {
+	return "1.1.1.1:3200"
+}
+
+func (strAddr) Network() string {
+	return "tcp"
+}
+func TestIPDetectionFromContext(t *testing.T) {
+	addresses := []net.Addr{
+		&net.IPAddr{
+			IP: net.IPv4(1, 1, 1, 1),
+		},
+		&net.TCPAddr{
+			IP:   net.IPv4(1, 1, 1, 1),
+			Port: 3200,
+		},
+		&net.UDPAddr{
+			IP:   net.IPv4(1, 1, 1, 1),
+			Port: 3200,
+		},
+		strAddr("1.1.1.1:3200"),
+	}
+	for _, addr := range addresses {
+		m := newMultiTest(t, NewFactory().CreateDefaultConfig(), nil)
+		ctx := client.NewContext(context.Background(), client.Info{
 			Addr: addr,
 		})
-	m.testConsume(
-		ctx,
-		generateTraces(),
-		generateMetrics(),
-		generateLogs(),
-		func(err error) {
-			assert.NoError(t, err)
-		})
+		m.testConsume(
+			ctx,
+			generateTraces(),
+			generateMetrics(),
+			generateLogs(),
+			func(err error) {
+				assert.NoError(t, err)
+			})
 
-	m.assertBatchesLen(1)
-	m.assertResourceObjectLen(0)
-	m.assertResource(0, func(r pdata.Resource) {
-		require.Greater(t, r.Attributes().Len(), 0)
-		assertResourceHasStringAttribute(t, r, "k8s.pod.ip", "1.1.1.1")
-	})
+		m.assertBatchesLen(1)
+		m.assertResourceObjectLen(0)
+		m.assertResource(0, func(r pcommon.Resource) {
+			require.Greater(t, r.Attributes().Len(), 0)
+			assertResourceHasStringAttribute(t, r, "k8s.pod.ip", "1.1.1.1")
+		})
+	}
 }
 
 func TestNilBatch(t *testing.T) {
 	m := newMultiTest(t, NewFactory().CreateDefaultConfig(), nil)
 	m.testConsume(
 		context.Background(),
-		pdata.NewTraces(),
-		pdata.NewMetrics(),
+		ptrace.NewTraces(),
+		pmetric.NewMetrics(),
 		generateLogs(),
 		func(err error) {
 			assert.NoError(t, err)
@@ -434,7 +460,7 @@ func TestNoIP(t *testing.T) {
 
 	m.assertBatchesLen(1)
 	m.assertResourceObjectLen(0)
-	m.assertResource(0, func(res pdata.Resource) {
+	m.assertResource(0, func(res pcommon.Resource) {
 		assert.Equal(t, 0, res.Attributes().Len())
 	})
 }
@@ -487,23 +513,23 @@ func TestIPSourceWithoutPodAssociation(t *testing.T) {
 			metrics := generateMetrics()
 			logs := generateLogs()
 
-			resources := []pdata.Resource{
+			resources := []pcommon.Resource{
 				traces.ResourceSpans().At(0).Resource(),
 				metrics.ResourceMetrics().At(0).Resource(),
 			}
 
 			for _, res := range resources {
 				if tc.resourceK8SIP != "" {
-					res.Attributes().InsertString(k8sIPLabelName, tc.resourceK8SIP)
+					res.Attributes().PutStr(k8sIPLabelName, tc.resourceK8SIP)
 				}
 				if tc.resourceIP != "" {
-					res.Attributes().InsertString(clientIPLabelName, tc.resourceIP)
+					res.Attributes().PutStr(clientIPLabelName, tc.resourceIP)
 				}
 			}
 
 			m.testConsume(ctx, traces, metrics, logs, nil)
 			m.assertBatchesLen(i + 1)
-			m.assertResource(i, func(res pdata.Resource) {
+			m.assertResource(i, func(res pcommon.Resource) {
 				require.Greater(t, res.Attributes().Len(), 0)
 				assertResourceHasStringAttribute(t, res, "k8s.pod.ip", tc.out)
 			})
@@ -581,19 +607,19 @@ func TestIPSourceWithPodAssociation(t *testing.T) {
 			metrics := generateMetrics()
 			logs := generateLogs()
 
-			resources := []pdata.Resource{
+			resources := []pcommon.Resource{
 				traces.ResourceSpans().At(0).Resource(),
 				metrics.ResourceMetrics().At(0).Resource(),
 				logs.ResourceLogs().At(0).Resource(),
 			}
 
 			for _, res := range resources {
-				res.Attributes().InsertString(tc.labelName, tc.labelValue)
+				res.Attributes().PutStr(tc.labelName, tc.labelValue)
 			}
 
 			m.testConsume(ctx, traces, metrics, logs, nil)
 			m.assertBatchesLen(i + 1)
-			m.assertResource(i, func(res pdata.Resource) {
+			m.assertResource(i, func(res pcommon.Resource) {
 				require.Greater(t, res.Attributes().Len(), 0)
 				assertResourceHasStringAttribute(t, res, tc.outLabel, tc.outValue)
 			})
@@ -632,7 +658,7 @@ func TestPodUID(t *testing.T) {
 
 	m.assertBatchesLen(1)
 	m.assertResourceObjectLen(0)
-	m.assertResource(0, func(r pdata.Resource) {
+	m.assertResource(0, func(r pcommon.Resource) {
 		require.Greater(t, r.Attributes().Len(), 0)
 		assertResourceHasStringAttribute(t, r, "k8s.pod.uid", "ef10d10b-2da5-4030-812e-5f45c1531227")
 	})
@@ -690,7 +716,7 @@ func TestProcessorAddLabels(t *testing.T) {
 
 		m.assertBatchesLen(i + 1)
 		m.assertResourceObjectLen(i)
-		m.assertResource(i, func(res pdata.Resource) {
+		m.assertResource(i, func(res pcommon.Resource) {
 			require.Greater(t, res.Attributes().Len(), 0)
 			assertResourceHasStringAttribute(t, res, "k8s.pod.ip", ip)
 			for k, v := range attrs {
@@ -738,7 +764,7 @@ func TestProcessorPicksUpPassthoughPodIp(t *testing.T) {
 	m.assertResourceObjectLen(0)
 	m.assertResourceAttributesLen(0, 3)
 
-	m.assertResource(0, func(res pdata.Resource) {
+	m.assertResource(0, func(res pcommon.Resource) {
 		assertResourceHasStringAttribute(t, res, k8sIPLabelName, "2.2.2.2")
 		assertResourceHasStringAttribute(t, res, "k", "v")
 		assertResourceHasStringAttribute(t, res, "1", "2")
@@ -781,7 +807,7 @@ func TestProcessorByPodNameAndNamespace(t *testing.T) {
 	m.assertResourceObjectLen(0)
 	m.assertResourceAttributesLen(0, 5)
 
-	m.assertResource(0, func(res pdata.Resource) {
+	m.assertResource(0, func(res pcommon.Resource) {
 		assertResourceHasStringAttribute(t, res, "_hostname", "PodA.test")
 		assertResourceHasStringAttribute(t, res, "k", "v")
 		assertResourceHasStringAttribute(t, res, "1", "2")
@@ -855,7 +881,6 @@ func TestMetricsProcessorHostname(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestMetricsProcessorHostnameWithPodAssociation(t *testing.T) {
@@ -931,7 +956,6 @@ func TestMetricsProcessorHostnameWithPodAssociation(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestPassthroughStart(t *testing.T) {
@@ -995,34 +1019,9 @@ func TestStartStop(t *testing.T) {
 	assert.True(t, controller.HasStopped())
 }
 
-func assertResourceHasStringAttribute(t *testing.T, r pdata.Resource, k, v string) {
+func assertResourceHasStringAttribute(t *testing.T, r pcommon.Resource, k, v string) {
 	got, ok := r.Attributes().Get(k)
 	assert.True(t, ok, fmt.Sprintf("resource does not contain attribute %s", k))
-	assert.EqualValues(t, pdata.AttributeValueTypeString, got.Type(), "attribute %s is not of type string", k)
-	assert.EqualValues(t, v, got.StringVal(), "attribute %s is not equal to %s", k, v)
+	assert.EqualValues(t, pcommon.ValueTypeStr, got.Type(), "attribute %s is not of type string", k)
+	assert.EqualValues(t, v, got.Str(), "attribute %s is not equal to %s", k, v)
 }
-
-//func BenchmarkConsumingTraceData(b *testing.B) {
-//	next := &testConsumer{}
-//	p, _ := NewTraceProcessor(
-//		zap.NewNop(),
-//		next,
-//		kube.NewFakeClient,
-//	)
-//
-//	kp, _ := p.(*kubernetesprocessor)
-//	kc, _ := kp.kc.(*kube.FakeClient)
-//
-//	b.ResetTimer()
-//	for i := 0; i < b.N; i++ {
-//		ip := "1.1.1.1"
-//		attrs := map[string]string{
-//			"pod":         "test-2323",
-//			"ns":          "default",
-//			"another tag": "value",
-//		}
-//		kc.Pods[ip] = &kube.Pod{Attributes: attrs}
-//		ctx := client.NewContext(context.Background(), &client.Client{IP: ip})
-//		p.ConsumeTraceData(ctx, consumerdata.TraceData{})
-//	}
-//}

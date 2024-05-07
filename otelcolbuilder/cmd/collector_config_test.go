@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -26,11 +27,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configmapprovider"
-	"go.opentelemetry.io/collector/service"
+	"go.opentelemetry.io/collector/otelcol"
 )
 
 func TestBuiltCollectorWithConfigurationFiles(t *testing.T) {
+	t.Setenv("TMPDIR", os.TempDir())
+
 	testcases := []struct {
 		name       string
 		configFile string
@@ -72,6 +74,22 @@ func TestBuiltCollectorWithConfigurationFiles(t *testing.T) {
 			name:       "resource and attributes processors with support for regexp for delete and hash actions",
 			configFile: "testdata/attribute_attraction_pattern.yaml",
 		},
+		{
+			name:       "sumologic processor can be used in logs, metrics and traces pipelines",
+			configFile: "testdata/sumologicprocessor.yaml",
+		},
+		{
+			name:       "multiple config files can be handled by the glob config provider",
+			configFile: "glob:testdata/multiple/*.yaml",
+		},
+		{
+			name:       "collect CPU load metrics using Host Metrics Receiver",
+			configFile: "../../examples/otelcolconfigs/config_logging.yaml",
+		},
+		{
+			name:       "config to parse logs using json_parser",
+			configFile: "../../examples/otelcolconfigs/logs_json/config.yaml",
+		},
 	}
 
 	for _, tc := range testcases {
@@ -79,17 +97,15 @@ func TestBuiltCollectorWithConfigurationFiles(t *testing.T) {
 			tc := tc
 			t.Parallel()
 
-			factories, err := components()
+			locations := []string{tc.configFile}
+			cp, err := NewConfigProvider(locations)
 			require.NoError(t, err)
 
 			t.Log("Creating new app...")
-
-			app, err := service.New(service.CollectorSettings{
-				BuildInfo: component.NewDefaultBuildInfo(),
-				Factories: factories,
-				ConfigMapProvider: configmapprovider.NewFile(
-					tc.configFile,
-				),
+			app, err := otelcol.NewCollector(otelcol.CollectorSettings{
+				BuildInfo:      component.NewDefaultBuildInfo(),
+				Factories:      components,
+				ConfigProvider: cp,
 			})
 			require.NoError(t, err)
 
@@ -101,7 +117,7 @@ func TestBuiltCollectorWithConfigurationFiles(t *testing.T) {
 
 				for {
 					switch state := app.GetState(); state {
-					case service.Running:
+					case otelcol.StateRunning:
 						t.Log("App is in the running state, calling .Shutdown()...")
 						time.Sleep(time.Second)
 						app.Shutdown()

@@ -19,16 +19,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
 func TestGetMetadata(t *testing.T) {
-	attributes := pdata.NewAttributeMap()
-	attributes.InsertString("key3", "value3")
-	attributes.InsertString("key1", "value1")
-	attributes.InsertString("key2", "value2")
-	attributes.InsertString("additional_key2", "value2")
-	attributes.InsertString("additional_key3", "value3")
+	attributes := pcommon.NewMap()
+	attributes.PutStr("key3", "value3")
+	attributes.PutStr("key1", "value1")
+	attributes.PutStr("key2", "value2")
+	attributes.PutStr("additional_key2", "value2")
+	attributes.PutStr("additional_key3", "value3")
 
 	regexes := []string{"^key[12]", "^key3"}
 	f, err := newFilter(regexes)
@@ -45,12 +45,12 @@ func TestGetMetadata(t *testing.T) {
 }
 
 func TestFilterOutMetadata(t *testing.T) {
-	attributes := pdata.NewAttributeMap()
-	attributes.InsertString("key3", "value3")
-	attributes.InsertString("key1", "value1")
-	attributes.InsertString("key2", "value2")
-	attributes.InsertString("additional_key2", "value2")
-	attributes.InsertString("additional_key3", "value3")
+	attributes := pcommon.NewMap()
+	attributes.PutStr("key3", "value3")
+	attributes.PutStr("key1", "value1")
+	attributes.PutStr("key2", "value2")
+	attributes.PutStr("additional_key2", "value2")
+	attributes.PutStr("additional_key3", "value3")
 
 	regexes := []string{"^key[12]", "^key3"}
 	f, err := newFilter(regexes)

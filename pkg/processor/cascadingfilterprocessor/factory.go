@@ -20,18 +20,20 @@ import (
 
 	"go.opencensus.io/stats/view"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/processor/processorhelper"
+	"go.opentelemetry.io/collector/processor"
 
 	cfconfig "github.com/SumoLogic/sumologic-otel-collector/pkg/processor/cascadingfilterprocessor/config"
 )
 
 const (
 	// The value of "type" Cascading Filter in configuration.
-	typeStr = "cascading_filter"
+	typeStr        = "cascading_filter"
+	stabilityLevel = component.StabilityLevelBeta
 )
+
+var Type = component.MustNewType(typeStr)
 
 func init() {
 	// TODO: this is hardcoding the metrics level
@@ -42,31 +44,28 @@ func init() {
 }
 
 // NewFactory returns a new factory for the Cascading Filter processor.
-func NewFactory() component.ProcessorFactory {
-	return processorhelper.NewFactory(
-		typeStr,
+func NewFactory() processor.Factory {
+	return processor.NewFactory(
+		Type,
 		createDefaultConfig,
-		processorhelper.WithTraces(createTraceProcessor))
+		processor.WithTraces(createTraceProcessor, stabilityLevel))
 }
 
-func createDefaultConfig() config.Processor {
-	id := config.NewComponentID("cascading_filter")
-	ps := config.NewProcessorSettings(id)
-
+func createDefaultConfig() component.Config {
 	return &cfconfig.Config{
-		ProcessorSettings: &ps,
-		DecisionWait:      30 * time.Second,
-		NumTraces:         100000,
-		SpansPerSecond:    0,
+		CollectorInstances: 1,
+		DecisionWait:       30 * time.Second,
+		NumTraces:          100000,
+		SpansPerSecond:     0,
 	}
 }
 
 func createTraceProcessor(
-	_ context.Context,
-	settings component.ProcessorCreateSettings,
-	cfg config.Processor,
+	ctx context.Context,
+	settings processor.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Traces,
-) (component.TracesProcessor, error) {
+) (processor.Traces, error) {
 	tCfg := cfg.(*cfconfig.Config)
-	return newTraceProcessor(settings.Logger, nextConsumer, *tCfg)
+	return newTraceProcessor(settings.Logger, nextConsumer, *tCfg, settings.ID)
 }

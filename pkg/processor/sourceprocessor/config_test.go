@@ -19,34 +19,31 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/otelcol/otelcoltest"
 )
 
 func TestLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
+	factories, err := otelcoltest.NopFactories()
 	assert.NoError(t, err)
 
 	factory := NewFactory()
-	factories.Processors[typeStr] = factory
+	factories.Processors[Type] = factory
 
 	cfgPath := path.Join(".", "testdata", "config.yaml")
-	cfg, err := configtest.LoadConfig(cfgPath, factories)
+	cfg, err := otelcoltest.LoadConfig(cfgPath, factories)
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 
-	id1 := config.NewComponentID("source")
+	id1 := component.NewID(Type)
 	p1 := cfg.Processors[id1]
 	assert.Equal(t, p1, factory.CreateDefaultConfig())
 
-	id2 := config.NewComponentIDWithName("source", "2")
+	id2 := component.NewIDWithName(Type, "2")
 	p2, ok := cfg.Processors[id2]
 	assert.True(t, ok)
 
-	ps2 := config.NewProcessorSettings(id2)
 	assert.Equal(t, p2, &Config{
-		ProcessorSettings:         &ps2,
 		Collector:                 "somecollector",
 		SourceHost:                "%{k8s.pod.hostname}",
 		SourceName:                "%{k8s.namespace.name}.%{k8s.pod.name}.%{k8s.container.name}/foo",
@@ -61,13 +58,15 @@ func TestLoadConfig(t *testing.T) {
 			"_SYSTEMD_UNIT":      "excluded_systemd_unit_regex",
 		},
 
-		AnnotationPrefix:   "pod_annotation_",
-		PodKey:             "k8s.pod.name",
-		PodNameKey:         "k8s.pod.pod_name",
-		PodTemplateHashKey: "pod_labels_pod-template-hash",
+		AnnotationPrefix:          "pod_annotation_",
+		NamespaceAnnotationPrefix: "namespace_annotation_",
+		PodKey:                    "k8s.pod.name",
+		PodNameKey:                "k8s.pod.pod_name",
+		PodTemplateHashKey:        "pod_labels_pod-template-hash",
 
 		ContainerAnnotations: ContainerAnnotationsConfig{
-			Enabled: false,
+			Enabled:          false,
+			ContainerNameKey: "k8s.container.name",
 			Prefixes: []string{
 				"sumologic.com/",
 			},

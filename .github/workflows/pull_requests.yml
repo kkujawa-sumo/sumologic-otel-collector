@@ -5,24 +5,57 @@ on:
     branches:
       - '**'
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  GO_VERSION: "1.21.4"
+
 jobs:
+  build-changed:
+    runs-on: ubuntu-22.04
+    outputs:
+      any_changed: ${{ steps.changed-files.outputs.any_changed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build related files changed
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            **/go.mod
+            **/go.sum
+            **/*.go
+            **/*.yaml
+            **/*.yml
+            **/Makefile
+            **/Makefile.common
+            **/Dockerfile*
 
   markdownlint:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
-      - uses: actions/setup-ruby@v1
+      - uses: actions/checkout@v4
+      - name: Check if related files changed
+        id: changed-files
+        uses: tj-actions/changed-files@v41
         with:
-          ruby-version: '2.6'
+          files: |
+            **/*.md
+      - uses: actions/setup-node@v4
+        if: steps.changed-files.outputs.any_changed == 'true'
       - name: Install markdownlint
-        run: gem install mdl
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: make install-markdownlint
       - name: Markdownlint check
+        if: steps.changed-files.outputs.any_changed == 'true'
         run: make markdownlint
 
   yamllint:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v4
       - name: Install yamllint
         run: pip install yamllint
       - name: yamllint
@@ -31,285 +64,294 @@ jobs:
   markdown-link-check:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v4
+      - name: Check if related files changed
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            **/*.md
       - uses: gaurav-nelson/github-action-markdown-link-check@v1
+        if: steps.changed-files.outputs.any_changed == 'true'
         with:
           config-file: '.markdown_link_check.json'
+          use-quiet-mode: yes
+          check-modified-files-only: yes
+          base-branch: ${{ github.base_ref }}
 
   md-links-lint:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v4
+      - name: Check if related files changed
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            **/*.md
       - name: Lint markdown links
+        if: steps.changed-files.outputs.any_changed == 'true'
         run: |
           make markdown-links-lint
 
   plugins-check:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v4
       - name: Install yq
         run: |
-          wget https://github.com/mikefarah/yq/releases/download/v4.12.1/yq_linux_amd64 -O /usr/bin/yq && chmod +x /usr/bin/yq
+          sudo wget https://github.com/mikefarah/yq/releases/download/v4.12.1/yq_linux_amd64 -O /usr/bin/yq && sudo chmod +x /usr/bin/yq
       - name: Check plugins in README and builder config
         run: ./ci/plugins_check.sh
 
   pre-commit-check:
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
-      - uses: actions/setup-python@v2
-      - uses: pre-commit/action@v2.0.3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - uses: pre-commit/action@v3.0.1
 
   check-uniform-dependencies:
     name: Check uniform dependencies
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v4
 
       - name: Check uniform dependencies
         run: make check-uniform-dependencies
 
+  shellcheck:
+    runs-on: ubuntu-20.04
+    env:
+      SHELLCHECK_VERSION: 0.10.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: |
+            curl --retry 10 --retry-max-time 120 --retry-delay 5 -Lo- https://github.com/koalaman/shellcheck/releases/download/v${{ env.SHELLCHECK_VERSION }}/shellcheck-v${{ env.SHELLCHECK_VERSION }}.linux.x86_64.tar.xz | tar -xJf -
+            sudo cp shellcheck-v${{ env.SHELLCHECK_VERSION }}/shellcheck /usr/local/bin && rm -rf shellcheck-v${{ env.SHELLCHECK_VERSION }}
+      - name: shellcheck
+        run: make shellcheck
+
   test:
     name: Test
-    runs-on: ${{ matrix.runs_on }}
+    uses: ./.github/workflows/workflow-test.yml
+    needs:
+      - build-changed
+    if: needs.build-changed.outputs.any_changed == 'true'
     strategy:
       matrix:
         include:
           - arch_os: linux_amd64
-            runs_on: ubuntu-20.04
-          - arch_os: darwin_amd64
-            runs_on: macos-latest
-    steps:
-      - uses: actions/checkout@v2.4.0
-
-      - name: Check if test related files changed
-        id: changed-files
-        uses: tj-actions/changed-files@v11
-        with:
-          files: |
-            pkg/
-            Makefile
-
-      - name: Setup go
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/setup-go@v2
-        with:
-          go-version: '1.17.2'
-
-      # As described in
-      # https://github.com/mvdan/github-actions-golang#how-do-i-set-up-caching-between-builds
-      - uses: actions/cache@v2
-        if: steps.changed-files.outputs.any_changed == 'true'
-        with:
-          path: |
-            /home/runner/go/pkg/mod
-            /home/runner/.cache/go-build
-            /Users/runner/go/pkg/mod
-            /Users/runner/Library/Caches/go-build
-          key: ${{matrix.arch_os}}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{matrix.arch_os}}-go-
-
-      - name: Add opentelemetry-collector-builder installation dir to PATH
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Run tests
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: make gotest
-
-  lint:
-    name: Lint (golangci-lint)
-    runs-on: ubuntu-20.04
-    strategy:
-      matrix:
-        arch_os: [ 'linux_amd64' ]
-    steps:
-      - uses: actions/checkout@v2.4.0
-
-      - name: Check if files changed that need linting
-        id: changed-files
-        uses: tj-actions/changed-files@v11
-        with:
-          files: |
-            otelcolbuilder/cmd/
-            pkg/
-
-      - name: Setup go
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/setup-go@v2
-        with:
-          go-version: '1.17.2'
-
-      # As described in
-      # https://github.com/mvdan/github-actions-golang#how-do-i-set-up-caching-between-builds
-      - uses: actions/cache@v2
-        if: steps.changed-files.outputs.any_changed == 'true'
-        with:
-          path: |
-            /home/runner/go/pkg/mod
-            /home/runner/.cache/go-build
-          key: ${{matrix.arch_os}}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{matrix.arch_os}}-go-
-
-      - uses: actions/cache@v2
-        if: steps.changed-files.outputs.any_changed == 'true'
-        with:
-          path: |
-            /home/runner/.cache/golangci-lint
-          key: ${{matrix.arch_os}}-golangcilint-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{matrix.arch_os}}-golangcilint-
-
-      - name: Install golangci-lint
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: make install-golangci-lint
-
-      - name: Add opentelemetry-collector-builder installation dir to PATH
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Run golangci-lint
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: make golint
-
-  build:
-    name: Build
-    runs-on: ${{ matrix.runs_on }}
-    strategy:
-      matrix:
-        include:
+            runs-on: ubuntu-20.04
           - arch_os: linux_amd64
-            runs_on: ubuntu-20.04
-          - arch_os: linux_arm64
-            runs_on: ubuntu-20.04
+            runs-on: ubuntu-20.04
+            boringcrypto: true
           - arch_os: darwin_amd64
-            runs_on: macos-latest
+            runs-on: macos-latest
+          - arch_os: windows_amd64
+            runs-on: windows-2022
+    with:
+      arch_os: ${{ matrix.arch_os }}
+      runs-on: ${{ matrix.runs-on }}
+      boringcrypto: ${{ matrix.boringcrypto == true }}
+
+  test-wixext:
+    name: Test (SumoLogic.wixext)
+    runs-on: windows-2019
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v4
 
       - name: Fetch current branch
         run: ./ci/fetch_current_branch.sh
 
-      - name: Check if build related files changed
-        id: changed-files
-        uses: tj-actions/changed-files@v11
-        with:
-          files: |
-            otelcolbuilder/.otelcol-builder.yaml
-            otelcolbuilder/Makefile
-            otelcolbuilder/cmd/
-            pkg/
-            Dockerfile.*
-            Makefile
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        working-directory: ./packaging/msi/SumoLogic.wixext/SumoLogicTests
+        run: nuget.exe restore -PackagesDirectory ../packages
+
+      - name: Build unit tests
+        working-directory: ./packaging/msi/SumoLogic.wixext/SumoLogicTests
+        run: msbuild.exe -p:Configuration=Release -p:Platform=AnyCPU -Restore
+
+      - name: Run unit tests
+        working-directory: ./packaging/msi/SumoLogic.wixext/SumoLogicTests/bin/Release
+        run: dotnet test -v:n ./SumoLogicTests.dll
+
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-20.04
+    needs: [ build-changed ]
+    if: needs.build-changed.outputs.any_changed == 'true'
+    strategy:
+      matrix:
+        arch_os: [ 'linux_amd64' ]
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup go
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.17.2'
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
 
-      # As described in
-      # https://github.com/mvdan/github-actions-golang#how-do-i-set-up-caching-between-builds
-      - uses: actions/cache@v2
-        if: steps.changed-files.outputs.any_changed == 'true'
+      - name: Get GOCACHE and GOMODCACHE
+        run: |
+          echo "GOMODCACHE=$(go env GOMODCACHE)" >> "$GITHUB_ENV"
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+
+      - uses: actions/cache/restore@v4
         with:
           path: |
-            /home/runner/go/pkg/mod
-            /home/runner/.cache/go-build
-            /Users/runner/go/pkg/mod
-            /Users/runner/Library/Caches/go-build
-          key: ${{matrix.arch_os}}-go-${{ hashFiles('**/go.sum') }}
+            ${{ env.GOMODCACHE }}/cache
+            ${{ env.GOCACHE }}
+          key: go-test-${{ env.GO_VERSION }}-${{matrix.arch_os}}-${{ hashFiles('pkg/**/go.sum', 'otelcolbuilder/.otelcol-builder.yaml') }}
           restore-keys: |
-            ${{matrix.arch_os}}-go-
+            go-test-${{ env.GO_VERSION }}-${{matrix.arch_os}}-
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            /home/runner/.cache/golangci-lint
+          key: golangci-lint-${{ env.GO_VERSION }}-${{matrix.arch_os}}-${{ hashFiles('pkg/**/go.sum', 'otelcolbuilder/.otelcol-builder.yaml') }}
+          restore-keys: |
+            golangci-lint-${{ env.GO_VERSION }}-${{matrix.arch_os}}-
+
+      - name: Install golangci-lint
+        run: make install-golangci-lint
 
       - name: Add opentelemetry-collector-builder installation dir to PATH
-        if: steps.changed-files.outputs.any_changed == 'true'
         run: echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Install opentelemetry-collector-builder
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: make install-builder
-        working-directory: ./otelcolbuilder
+      - name: Run golangci-lint
+        run: make golint
 
-      - name: Build
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: make otelcol-sumo-${{matrix.arch_os}}
-        working-directory: ./otelcolbuilder
-
-      # TODO:
-      # Move that out to a separate job and run on a corresponding's OS runner.
-      # - name: Run the binary
-      #   run: ./otelcol-sumo-${{matrix.arch_os}} --version
-      #   working-directory: ./otelcolbuilder/cmd/
-
-      - name: Show included modules
-        if: steps.changed-files.outputs.any_changed == 'true'
-        working-directory: ./otelcolbuilder/cmd
-        run: |
-          go version -m otelcol-sumo-${{matrix.arch_os}} | \
-          grep -E "/(receiver|exporter|processor|extension)/"
-
-      - name: Store binary as action artifact
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/upload-artifact@v2
-        with:
-          name: otelcol-sumo-${{matrix.arch_os}}
-          path: ./otelcolbuilder/cmd/otelcol-sumo-${{matrix.arch_os}}
-          if-no-files-found: error
+  build:
+    name: Build
+    uses: ./.github/workflows/workflow-build.yml
+    strategy:
+      matrix:
+        include:
+          - arch_os: linux_amd64
+            runs-on: ubuntu-20.04
+          - arch_os: linux_amd64
+            runs-on: ubuntu-20.04
+            fips: true
+          - arch_os: linux_arm64
+            runs-on: ubuntu-20.04
+          - arch_os: darwin_amd64
+            runs-on: macos-latest
+          - arch_os: darwin_arm64
+            runs-on: macos-latest
+          - arch_os: windows_amd64
+            runs-on: windows-2022
+          - arch_os: windows_amd64
+            runs-on: windows-2022
+            fips: true
+    with:
+      arch_os: ${{ matrix.arch_os }}
+      runs-on: ${{ matrix.runs-on }}
+      fips: ${{ matrix.fips == true }}
+    secrets:
+      apple_developer_certificate_p12_base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }}
+      apple_developer_certificate_password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }}
+      app_store_connect_password: ${{ secrets.AC_PASSWORD }}
+      microsoft_certificate: ${{ secrets.MICROSOFT_CERTIFICATE }}
+      microsoft_certificate_password: ${{ secrets.MICROSOFT_CERTIFICATE_PASSWORD }}
+      microsoft_certificate_hash: ${{ secrets.MICROSOFT_CERTHASH }}
+      microsoft_certificate_name: ${{ secrets.MICROSOFT_CERTNAME }}
+      microsoft_description: ${{ secrets.MICROSOFT_DESCRIPTION }}
 
   build-and-test-container-images:
     name: Build container
     runs-on: ubuntu-20.04
     needs:
+      - build-changed
       - build
+    if: needs.build-changed.outputs.any_changed == 'true'
     strategy:
       matrix:
         arch_os: [ 'linux_amd64', 'linux_arm64']
     steps:
-      - uses: actions/checkout@v2.4.0
-
-      - name: Check if build related files changed
-        id: changed-files
-        uses: tj-actions/changed-files@v11
-        with:
-          files: |
-            otelcolbuilder/.otelcol-builder.yaml
-            otelcolbuilder/Makefile
-            otelcolbuilder/cmd/
-            pkg/
-            Dockerfile.*
-            Makefile
+      - uses: actions/checkout@v4
 
       - name: Set up QEMU
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: docker/setup-qemu-action@v1.2.0
+        uses: docker/setup-qemu-action@v3.0.0
 
       - name: Set up Buildx
-        if: steps.changed-files.outputs.any_changed == 'true'
         id: buildx
-        uses: docker/setup-buildx-action@v1.6.0
+        uses: docker/setup-buildx-action@v3.3.0
 
       - name: Show Buildx platforms
-        if: steps.changed-files.outputs.any_changed == 'true'
         run: echo ${{ steps.buildx.outputs.platforms }}
 
       - name: Download binary action artifact from build phase
-        if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: otelcol-sumo-${{matrix.arch_os}}
           path: artifacts/
 
       - name: Build the container image
-        if: steps.changed-files.outputs.any_changed == 'true'
         run: |
           cp artifacts/otelcol-sumo-${{matrix.arch_os}} otelcol-sumo
           make build-container-multiplatform \
             PLATFORM=${{ matrix.arch_os }}
 
       - name: Test built image
-        if: steps.changed-files.outputs.any_changed == 'true'
         run: make test-built-image
+
+      - name: Download FIPS binary action artifact from build phase
+        if: matrix.arch_os == 'linux_amd64'
+        uses: actions/download-artifact@v4
+        with:
+          name: otelcol-sumo-fips-${{matrix.arch_os}}
+          path: artifacts/
+
+      - name: Build the FIPS container image
+        if: matrix.arch_os == 'linux_amd64'
+        run: |
+          cp artifacts/otelcol-sumo-fips-${{matrix.arch_os}} otelcol-sumo
+          make build-container-multiplatform \
+            PLATFORM=${{ matrix.arch_os }} BUILD_TYPE_SUFFIX="-fips"
+
+      - name: Test built FIPS image
+        if: matrix.arch_os == 'linux_amd64'
+        run: make test-built-image BUILD_TAG="latest-fips"
+
+  build-windows-container:
+    name: Build windows container
+    needs:
+      - build-changed
+      - build
+    if: needs.build-changed.outputs.any_changed == 'true'
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include:
+          - arch_os: windows_amd64
+            base_image_tag: ltsc2022
+            runs-on: windows-2022
+          - arch_os: windows_amd64
+            base_image_tag: ltsc2019
+            runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary action artifact from build phase
+        uses: actions/download-artifact@v4
+        with:
+          name: otelcol-sumo-${{matrix.arch_os}}.exe
+          path: artifacts/
+
+      - name: Build the container image
+        run: |
+          cp artifacts/otelcol-sumo-${{matrix.arch_os}}.exe otelcol-sumo.exe
+          make build-container-windows \
+            PLATFORM=${{ matrix.arch_os }}_${{ matrix.base_image_tag }}
+
+      - name: Test built image
+        run: make test-built-image
+
+      # ToDo: build windows FIPS image

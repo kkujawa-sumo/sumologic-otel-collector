@@ -5,13 +5,13 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/processor"
 	"go.opentelemetry.io/collector/processor/processorhelper"
 )
 
 const (
-	cfgType = "metric_frequency"
+	typeStr = "metric_frequency"
 
 	defaultMinPointAccumulationTime       = 15 * time.Minute
 	defaultConstantMetricsReportFrequency = 5 * time.Minute
@@ -22,22 +22,21 @@ const (
 	defaultDataPointExpirationTime        = 1 * time.Hour
 	defaultDataPointCacheCleanupInterval  = 10 * time.Minute
 	defaultMetricCacheCleanupInterval     = 3 * time.Hour
+	stabilityLevel                        = component.StabilityLevelBeta
 )
 
-func NewFactory() component.ProcessorFactory {
-	return processorhelper.NewFactory(
-		cfgType,
+var Type = component.MustNewType(typeStr)
+
+func NewFactory() processor.Factory {
+	return processor.NewFactory(
+		Type,
 		createDefaultConfig,
-		processorhelper.WithMetrics(createMetricsProcessor),
+		processor.WithMetrics(createMetricsProcessor, stabilityLevel),
 	)
 }
 
-func createDefaultConfig() config.Processor {
-	id := config.NewComponentID(cfgType)
-	ps := config.NewProcessorSettings(id)
-
+func createDefaultConfig() component.Config {
 	return &Config{
-		&ps,
 		sieveConfig{
 			MinPointAccumulationTime:       defaultMinPointAccumulationTime,
 			ConstantMetricsReportFrequency: defaultConstantMetricsReportFrequency,
@@ -55,13 +54,13 @@ func createDefaultConfig() config.Processor {
 }
 
 func createMetricsProcessor(
-	_ context.Context,
-	_ component.ProcessorCreateSettings,
-	cfg config.Processor,
+	ctx context.Context,
+	params processor.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Metrics,
-) (component.MetricsProcessor, error) {
+) (processor.Metrics, error) {
 	var internalProcessor = &metricsfrequencyprocessor{
 		sieve: newMetricSieve(cfg.(*Config)),
 	}
-	return processorhelper.NewMetricsProcessor(cfg, nextConsumer, internalProcessor.ProcessMetrics)
+	return processorhelper.NewMetricsProcessor(ctx, params, cfg, nextConsumer, internalProcessor.ProcessMetrics)
 }

@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 
 	"github.com/SumoLogic/sumologic-otel-collector/pkg/processor/cascadingfilterprocessor/bigendianconverter"
 )
@@ -116,11 +116,14 @@ func concurrencyTest(t *testing.T, numBatches, newBatchesInitialCapacity, batchC
 		}
 	}()
 
-	ids := generateSequentialIds(10000)
+	// don't set this too high, we spawn a goroutine for each one, and the race detector on Windows has
+	// a limit of 8192
+	traceIdCount := 1000
+	ids := generateSequentialIds(uint64(traceIdCount))
 	wg := &sync.WaitGroup{}
 	for i := 0; i < len(ids); i++ {
 		wg.Add(1)
-		go func(id pdata.TraceID) {
+		go func(id pcommon.TraceID) {
 			batcher.AddToCurrentBatch(id)
 			wg.Done()
 		}(ids[i])
@@ -144,16 +147,16 @@ func concurrencyTest(t *testing.T, numBatches, newBatchesInitialCapacity, batchC
 
 	idSeen := make(map[[16]byte]bool, len(ids))
 	for _, id := range got {
-		idSeen[id.Bytes()] = true
+		idSeen[id] = true
 	}
 
 	for i := 0; i < len(ids); i++ {
-		require.True(t, idSeen[ids[i].Bytes()], "want id %v but id was not seen", ids[i])
+		require.True(t, idSeen[ids[i]], "want id %v but id was not seen", ids[i])
 	}
 }
 
-func generateSequentialIds(numIds uint64) []pdata.TraceID {
-	ids := make([]pdata.TraceID, numIds)
+func generateSequentialIds(numIds uint64) []pcommon.TraceID {
+	ids := make([]pcommon.TraceID, numIds)
 	for i := uint64(0); i < numIds; i++ {
 		ids[i] = bigendianconverter.UInt64ToTraceID(0, i)
 	}

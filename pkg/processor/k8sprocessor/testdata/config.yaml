@@ -10,12 +10,11 @@ processors:
     extract:
       metadata:
         # extract the following well-known metadata fields
-        - podName
-        - podUID
-        - deployment
-        - cluster
-        - namespace
-        - node
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.deployment.name
+        - k8s.namespace.name
+        - k8s.node.name
         - startTime
       tags:
         # It is possible to provide your custom key names for each of the extracted metadata:
@@ -39,6 +38,11 @@ processors:
         # You can also extract all labels, e.g.:
         # - tag_name: k8s.label.%s
         #   key: "*"
+
+      namespace_annotations:
+        - tag_name: "namespace_annotations_%s"
+          key: "*"
+
       namespace_labels:
         - tag_name: "namespace_labels_%s"
           key: "*"
@@ -72,6 +76,11 @@ processors:
       - from: resource_attribute
         name: k8s.pod.uid
 
+    exclude:
+      pods:
+        - name: jaeger-agent
+        - name: jaeger-collector
+
 exporters:
   nop:
 
@@ -79,5 +88,5 @@ service:
   pipelines:
     traces:
       receivers: [nop]
-      processors: [k8s_tagger]
+      processors: [k8s_tagger, k8s_tagger/2]
       exporters: [nop]

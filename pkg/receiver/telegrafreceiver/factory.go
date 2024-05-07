@@ -17,47 +17,52 @@ package telegrafreceiver
 import (
 	"context"
 	"fmt"
+	"time"
 
 	telegrafagent "github.com/influxdata/telegraf/agent"
 	telegrafconfig "github.com/influxdata/telegraf/config"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/receiver/receiverhelper"
+	"go.opentelemetry.io/collector/receiver"
 )
 
 const (
-	typeStr    = "telegraf"
-	versionStr = "v0.1"
+	typeStr        = "telegraf"
+	versionStr     = "v0.1"
+	stabilityLevel = component.StabilityLevelBeta
 )
 
+var Type = component.MustNewType(typeStr)
+
 // NewFactory creates a factory for telegraf receiver.
-func NewFactory() component.ReceiverFactory {
-	return receiverhelper.NewFactory(
-		typeStr,
+func NewFactory() receiver.Factory {
+	return receiver.NewFactory(
+		Type,
 		createDefaultConfig,
-		receiverhelper.WithMetrics(createMetricsReceiver),
+		receiver.WithMetrics(createMetricsReceiver, stabilityLevel),
 	)
 }
 
-func createDefaultConfig() config.Receiver {
+func createDefaultConfig() component.Config {
 	// TypeVal: config.Type(typeStr),
 	// NameVal: typeStr,
 	//
-	rs := config.NewReceiverSettings(config.NewComponentID(typeStr))
 	return &Config{
-		ReceiverSettings: &rs,
-		SeparateField:    false,
+		SeparateField: false,
+		// we mostly expect to get recoverable errors from the memory_limiter, which is unlikely to have
+		// a check interval less than 1s, so retrying much more frequently is pointless
+		ConsumeRetryDelay: 500 * time.Millisecond,
+		ConsumeMaxRetries: 10,
 	}
 }
 
 // createMetricsReceiver creates a metrics receiver based on provided config.
 func createMetricsReceiver(
 	ctx context.Context,
-	params component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	params receiver.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Metrics,
-) (component.MetricsReceiver, error) {
+) (receiver.Metrics, error) {
 	tCfg, ok := cfg.(*Config)
 	if !ok {
 		return nil, fmt.Errorf("failed reading telegraf agent config from otc config")
@@ -67,15 +72,14 @@ func createMetricsReceiver(
 	if err := tConfig.LoadConfigData([]byte(tCfg.AgentConfig)); err != nil {
 		return nil, fmt.Errorf("failed loading telegraf agent config: %w", err)
 	}
-	tAgent, err := telegrafagent.NewAgent(tConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed creating telegraf agent: %w", err)
-	}
+	tAgent := telegrafagent.NewAgent(tConfig)
 
 	return &telegrafreceiver{
-		agent:           tAgent,
-		consumer:        nextConsumer,
-		logger:          params.Logger,
-		metricConverter: newConverter(tCfg.SeparateField, params.Logger),
+		agent:             tAgent,
+		consumer:          nextConsumer,
+		logger:            params.Logger,
+		metricConverter:   newConverter(tCfg.SeparateField, params.Logger),
+		consumeRetryDelay: tCfg.ConsumeRetryDelay,
+		consumeMaxRetries: tCfg.ConsumeMaxRetries,
 	}, nil
 }

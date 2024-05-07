@@ -20,52 +20,50 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/otelcol/otelcoltest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 )
 
 func TestLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
+	factories, err := otelcoltest.NopFactories()
 	require.NoError(t, err)
 	factory := NewFactory()
-	factories.Processors[config.Type(typeStr)] = factory
-	require.NoError(t, err)
+	factories.Processors[Type] = factory
 
-	require.NoError(t, factory.CreateDefaultConfig().Validate())
+	require.NoError(t, component.ValidateConfig(factory.CreateDefaultConfig()))
 
-	cfg, err := configtest.LoadConfig(
+	cfg, err := otelcoltest.LoadConfig(
 		path.Join(".", "testdata", "config.yaml"),
-		factories)
-
-	require.Nil(t, err)
+		factories,
+	)
+	require.NoError(t, err)
 	require.NotNil(t, cfg)
+	require.NoError(t, cfg.Validate())
 
-	p0 := cfg.Processors[config.NewComponentID(typeStr)]
-	assert.Equal(t, p0,
+	p0 := cfg.Processors[component.NewID(Type)]
+	assert.EqualValues(t,
 		&Config{
-			ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
-			APIConfig:         k8sconfig.APIConfig{AuthType: k8sconfig.AuthTypeServiceAccount},
-			Extract:           ExtractConfig{Delimiter: ", "},
-		})
+			APIConfig: k8sconfig.APIConfig{AuthType: k8sconfig.AuthTypeServiceAccount},
+			Extract:   ExtractConfig{Delimiter: ", "},
+		},
+		p0,
+	)
 
-	p1 := cfg.Processors[config.NewComponentIDWithName(typeStr, "2")]
-	assert.Equal(t, p1,
+	p1 := cfg.Processors[component.NewIDWithName(Type, "2")]
+	assert.EqualValues(t,
 		&Config{
-			ProcessorSettings:  config.NewProcessorSettings(config.NewComponentIDWithName(typeStr, "2")),
 			APIConfig:          k8sconfig.APIConfig{AuthType: k8sconfig.AuthTypeKubeConfig},
 			Passthrough:        false,
 			OwnerLookupEnabled: true,
 			Extract: ExtractConfig{
 				Metadata: []string{
-					"podName",
-					"podUID",
-					"deployment",
-					"cluster",
-					"namespace",
-					"node",
+					"k8s.pod.name",
+					"k8s.pod.uid",
+					"k8s.deployment.name",
+					"k8s.namespace.name",
+					"k8s.node.name",
 					"startTime",
 				},
 				Annotations: []FieldExtractConfig{
@@ -75,6 +73,9 @@ func TestLoadConfig(t *testing.T) {
 				Labels: []FieldExtractConfig{
 					{TagName: "l1", Key: "label1"},
 					{TagName: "l2", Key: "label2", Regex: "field=(?P<value>.+)"},
+				},
+				NamespaceAnnotations: []FieldExtractConfig{
+					{TagName: "namespace_annotations_%s", Key: "*"},
 				},
 				NamespaceLabels: []FieldExtractConfig{
 					{TagName: "namespace_labels_%s", Key: "*"},
@@ -119,5 +120,13 @@ func TestLoadConfig(t *testing.T) {
 					Name: "k8s.pod.uid",
 				},
 			},
-		})
+			Exclude: ExcludeConfig{
+				Pods: []ExcludePodConfig{
+					{Name: "jaeger-agent"},
+					{Name: "jaeger-collector"},
+				},
+			},
+		},
+		p1,
+	)
 }

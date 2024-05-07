@@ -1,4 +1,8 @@
-GOTEST=go test -count 1
+ifeq ($(OS),Windows_NT)
+	OS=windows
+endif
+
+GOTEST=go test -race
 LINT=golangci-lint
 
 .PHONY: test
@@ -16,4 +20,4 @@ lint:
 
 .PHONY: mod-download-all
 mod-download-all:
-	go mod download all && go mod tidy -compat=1.17
+	go mod download all && go mod tidy

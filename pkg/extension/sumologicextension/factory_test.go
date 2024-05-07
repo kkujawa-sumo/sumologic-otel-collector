@@ -25,19 +25,21 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/extension"
+
+	"github.com/SumoLogic/sumologic-otel-collector/pkg/extension/sumologicextension/credentials"
 )
 
 func TestFactory_CreateDefaultConfig(t *testing.T) {
 	cfg := createDefaultConfig()
 	homePath, err := os.UserHomeDir()
 	require.NoError(t, err)
-	defaultCredsPath := path.Join(homePath, collectorCredentialsDirectory)
+	defaultCredsPath := path.Join(homePath, credentials.DefaultCollectorCredentialsDirectory)
 	assert.Equal(t, &Config{
-		ExtensionSettings:             config.NewExtensionSettings(config.NewComponentID(typeStr)),
 		HeartBeatInterval:             DefaultHeartbeatInterval,
 		ApiBaseUrl:                    DefaultApiBaseUrl,
 		CollectorCredentialsDirectory: defaultCredsPath,
+		DiscoverCollectorTags:         true,
 		BackOff: backOffConfig{
 			InitialInterval: backoff.DefaultInitialInterval,
 			MaxInterval:     backoff.DefaultMaxInterval,
@@ -45,15 +47,14 @@ func TestFactory_CreateDefaultConfig(t *testing.T) {
 		},
 	}, cfg)
 
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, component.ValidateConfig(cfg))
 
 	ccfg := cfg.(*Config)
 	ccfg.CollectorName = "test_collector"
-	ccfg.Credentials.AccessID = "dummy_access_id"
-	ccfg.Credentials.AccessKey = "dummy_access_key"
+	ccfg.Credentials.InstallationToken = "dummy_install_token"
 
 	ext, err := createExtension(context.Background(),
-		component.ExtensionCreateSettings{
+		extension.CreateSettings{
 			TelemetrySettings: componenttest.NewNopTelemetrySettings(),
 		},
 		cfg,
@@ -65,11 +66,10 @@ func TestFactory_CreateDefaultConfig(t *testing.T) {
 func TestFactory_CreateExtension(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.CollectorName = "test_collector"
-	cfg.Credentials.AccessID = "dummy_access_id"
-	cfg.Credentials.AccessKey = "dummy_access_key"
+	cfg.Credentials.InstallationToken = "dummy_install_token"
 
 	ext, err := createExtension(context.Background(),
-		component.ExtensionCreateSettings{
+		extension.CreateSettings{
 			TelemetrySettings: componenttest.NewNopTelemetrySettings(),
 		},
 		cfg,

@@ -14,14 +14,8 @@
 
 package sourceprocessor
 
-import (
-	"go.opentelemetry.io/collector/config"
-)
-
 // Config defines configuration for Source processor.
 type Config struct {
-	*config.ProcessorSettings `mapstructure:"-"`
-
 	Collector                 string `mapstructure:"collector"`
 	SourceHost                string `mapstructure:"source_host"`
 	SourceName                string `mapstructure:"source_name"`
@@ -35,15 +29,17 @@ type Config struct {
 	// the processed entry is dropped.
 	Exclude map[string]string `mapstructure:"exclude"`
 
-	AnnotationPrefix   string `mapstructure:"annotation_prefix"`
-	PodKey             string `mapstructure:"pod_key"`
-	PodNameKey         string `mapstructure:"pod_name_key"`
-	PodTemplateHashKey string `mapstructure:"pod_template_hash_key"`
+	AnnotationPrefix          string `mapstructure:"annotation_prefix"`
+	NamespaceAnnotationPrefix string `mapstructure:"namespace_annotation_prefix"`
+	PodKey                    string `mapstructure:"pod_key"`
+	PodNameKey                string `mapstructure:"pod_name_key"`
+	PodTemplateHashKey        string `mapstructure:"pod_template_hash_key"`
 
 	ContainerAnnotations ContainerAnnotationsConfig `mapstructure:"container_annotations"`
 }
 
 type ContainerAnnotationsConfig struct {
-	Enabled  bool     `mapstructure:"enabled"`
-	Prefixes []string `mapstructure:"prefixes"`
+	Enabled          bool     `mapstructure:"enabled"`
+	ContainerNameKey string   `mapstructure:"container_name_key"`
+	Prefixes         []string `mapstructure:"prefixes"`
 }

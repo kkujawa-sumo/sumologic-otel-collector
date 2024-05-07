@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 
+	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
 	"k8s.io/apimachinery/pkg/selection"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
@@ -35,7 +36,6 @@ const (
 	metadataContainerID     = "containerId"
 	metadataContainerName   = "containerName"
 	metadataContainerImage  = "containerImage"
-	metadataClusterName     = "clusterName"
 	metadataCronJobName     = "cronJobName"
 	metadataDaemonSetName   = "daemonSetName"
 	metadataDeploymentName  = "deploymentName"
@@ -49,6 +49,10 @@ const (
 	metadataServiceName     = "serviceName"
 	metadataStartTime       = "startTime"
 	metadataStatefulSetName = "statefulSetName"
+
+	metadataOtelSemconvServiceName = "k8s.service.name"  // no semantic convention for service name as of right now, but this is reasonable
+	metadataOtelPodStartTime       = "k8s.pod.startTime" // no semantic convention for this, but keeping a similar format for consistency
+	deprecatedMetadataClusterName  = "clusterName"
 )
 
 // Option represents a configuration option that can be passes.
@@ -87,7 +91,6 @@ func WithExtractMetadata(fields ...string) Option {
 	return func(p *kubernetesprocessor) error {
 		if len(fields) == 0 {
 			fields = []string{
-				metadataClusterName,
 				metadataContainerID,
 				metadataContainerImage,
 				metadataContainerName,
@@ -106,40 +109,40 @@ func WithExtractMetadata(fields ...string) Option {
 		}
 		for _, field := range fields {
 			switch field {
-			case metadataClusterName:
-				p.rules.ClusterName = true
-			case metadataContainerID:
+			case metadataContainerID, conventions.AttributeContainerID:
 				p.rules.ContainerID = true
-			case metadataContainerImage:
+			case metadataContainerImage, conventions.AttributeContainerImageName:
 				p.rules.ContainerImage = true
-			case metadataContainerName:
+			case metadataContainerName, conventions.AttributeContainerName:
 				p.rules.ContainerName = true
-			case metadataCronJobName:
+			case metadataCronJobName, conventions.AttributeK8SCronJobName:
 				p.rules.CronJobName = true
-			case metadataDaemonSetName:
+			case metadataDaemonSetName, conventions.AttributeK8SDaemonSetName:
 				p.rules.DaemonSetName = true
-			case metadataDeploymentName:
+			case metadataDeploymentName, conventions.AttributeK8SDeploymentName:
 				p.rules.DeploymentName = true
-			case metadataHostName:
+			case metadataHostName, conventions.AttributeHostName:
 				p.rules.HostName = true
-			case metadataJobName:
+			case metadataJobName, conventions.AttributeK8SJobName:
 				p.rules.JobName = true
-			case metadataNamespace:
+			case metadataNamespace, conventions.AttributeK8SNamespaceName:
 				p.rules.Namespace = true
-			case metadataNodeName:
+			case metadataNodeName, conventions.AttributeK8SNodeName:
 				p.rules.NodeName = true
-			case metadataPodID:
+			case metadataPodID, conventions.AttributeK8SPodUID:
 				p.rules.PodUID = true
-			case metadataPodName:
+			case metadataPodName, conventions.AttributeK8SPodName:
 				p.rules.PodName = true
-			case metadataReplicaSetName:
+			case metadataReplicaSetName, conventions.AttributeK8SReplicaSetName:
 				p.rules.ReplicaSetName = true
-			case metadataServiceName:
+			case metadataServiceName, metadataOtelSemconvServiceName:
 				p.rules.ServiceName = true
-			case metadataStartTime:
+			case metadataStartTime, metadataOtelPodStartTime:
 				p.rules.StartTime = true
-			case metadataStatefulSetName:
+			case metadataStatefulSetName, conventions.AttributeK8SStatefulSetName:
 				p.rules.StatefulSetName = true
+			case deprecatedMetadataClusterName, conventions.AttributeK8SClusterName:
+				p.logger.Warn("clusterName metadata field has been deprecated and will be removed soon")
 			default:
 				return fmt.Errorf("\"%s\" is not a supported metadata field", field)
 			}
@@ -153,9 +156,7 @@ func WithExtractTags(tagsMap map[string]string) Option {
 	return func(p *kubernetesprocessor) error {
 		var tags = kube.NewExtractionFieldTags()
 		for field, tag := range tagsMap {
-			switch field {
-			case strings.ToLower(metadataClusterName):
-				tags.ClusterName = tag
+			switch strings.ToLower(field) {
 			case strings.ToLower(metadataContainerID):
 				tags.ContainerID = tag
 			case strings.ToLower(metadataContainerName):
@@ -184,6 +185,8 @@ func WithExtractTags(tagsMap map[string]string) Option {
 				tags.StartTime = tag
 			case strings.ToLower(metadataStatefulSetName):
 				tags.StatefulSetName = tag
+			case strings.ToLower(deprecatedMetadataClusterName):
+				p.logger.Warn("clusterName metadata field has been deprecated and will be removed soon")
 			default:
 				return fmt.Errorf("\"%s\" is not a supported metadata field", field)
 			}
@@ -225,6 +228,18 @@ func WithExtractAnnotations(annotations ...FieldExtractConfig) Option {
 			return err
 		}
 		p.rules.Annotations = annotations
+		return nil
+	}
+}
+
+// WithExtractNamespaceAnnotations allows specifying options to control extraction of namespace annotations tags.
+func WithExtractNamespaceAnnotations(annotations ...FieldExtractConfig) Option {
+	return func(p *kubernetesprocessor) error {
+		annotations, err := extractFieldRules("namespace_annotations", annotations...)
+		if err != nil {
+			return err
+		}
+		p.rules.NamespaceAnnotations = annotations
 		return nil
 	}
 }
@@ -362,6 +377,23 @@ func WithExtractPodAssociations(podAssociations ...PodAssociationConfig) Option 
 func WithDelimiter(delimiter string) Option {
 	return func(p *kubernetesprocessor) error {
 		p.delimiter = delimiter
+		return nil
+	}
+}
+
+// WithExcludes allows specifying pods to exclude
+func WithExcludes(excludeConfig ExcludeConfig) Option {
+	return func(p *kubernetesprocessor) error {
+		excludes := kube.Excludes{}
+		names := excludeConfig.Pods
+
+		for _, name := range names {
+			excludes.Pods = append(excludes.Pods, kube.ExcludePods{
+				Name: regexp.MustCompile(name.Name)},
+			)
+		}
+
+		p.podIgnore = excludes
 		return nil
 	}
 }

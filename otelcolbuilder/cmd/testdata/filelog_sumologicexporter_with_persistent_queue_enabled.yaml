@@ -1,6 +1,6 @@
 extensions:
   file_storage/buff:
-    directory: /tmp/
+    directory: "${TMPDIR}"
     timeout: 5s
 
 receivers:
@@ -11,10 +11,12 @@ receivers:
 exporters:
   sumologic:
     endpoint: http://dummy.endpoint.com:8888/api
+    retry_on_failure:
+      enabled: false
     sending_queue:
       enabled: true
       queue_size: 100
-      persistent_storage_enabled: true
+      storage: file_storage/buff
 
 service:
   extensions:

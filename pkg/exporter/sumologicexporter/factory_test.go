@@ -19,54 +19,42 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configauth"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configretry"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 )
 
 func TestType(t *testing.T) {
 	factory := NewFactory()
 	pType := factory.Type()
-	assert.Equal(t, pType, config.Type("sumologic"))
+	assert.Equal(t, pType, Type)
 }
 
 func TestCreateDefaultConfig(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
-	qs := exporterhelper.DefaultQueueSettings()
+	qs := exporterhelper.NewDefaultQueueSettings()
 	qs.Enabled = false
 
 	assert.Equal(t, cfg, &Config{
-		ExporterSettings:   config.NewExporterSettings(config.NewComponentID(typeStr)),
-		CompressEncoding:   "gzip",
 		MaxRequestBodySize: 1_048_576,
 		LogFormat:          "otlp",
 		MetricFormat:       "otlp",
-		SourceCategory:     "",
-		SourceName:         "",
-		SourceHost:         "",
 		Client:             "otelcol",
-		ClearLogsTimestamp: true,
-		JSONLogs: JSONLogs{
-			LogKey:       "log",
-			AddTimestamp: true,
-			TimestampKey: "timestamp",
-		},
-		GraphiteTemplate:         "%{_metric_}",
-		TranslateAttributes:      true,
-		TranslateTelegrafMetrics: true,
-		TraceFormat:              "otlp",
+		TraceFormat:        "otlp",
 
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Timeout: 5 * time.Second,
+		ClientConfig: confighttp.ClientConfig{
+			Timeout:     30 * time.Second,
+			Compression: "gzip",
 			Auth: &configauth.Authentication{
-				AuthenticatorID: config.NewComponentID("sumologic"),
+				AuthenticatorID: component.NewID(Type),
 			},
 		},
-		RetrySettings: exporterhelper.DefaultRetrySettings(),
+		BackOffConfig: configretry.NewDefaultBackOffConfig(),
 		QueueSettings: qs,
 	})
 
-	assert.NoError(t, cfg.Validate())
+	assert.NoError(t, component.ValidateConfig(cfg))
 }

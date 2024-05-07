@@ -21,21 +21,20 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/otelcol/otelcoltest"
 
 	cfconfig "github.com/SumoLogic/sumologic-otel-collector/pkg/processor/cascadingfilterprocessor/config"
 )
 
 func TestLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
+	factories, err := otelcoltest.NopFactories()
 	assert.NoError(t, err)
 
 	factory := NewFactory()
 	factories.Processors[factory.Type()] = factory
 
-	cfg, err := configtest.LoadConfig(path.Join(".", "testdata", "cascading_filter_config.yaml"), factories)
+	cfg, err := otelcoltest.LoadConfig(path.Join(".", "testdata", "cascading_filter_config.yaml"), factories)
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
@@ -47,14 +46,13 @@ func TestLoadConfig(t *testing.T) {
 	namePatternValue := "foo.*"
 	healthCheckNamePatternValue := "health.*"
 
-	id1 := config.NewComponentIDWithName("cascading_filter", "1")
-	ps1 := config.NewProcessorSettings(id1)
+	id1 := component.NewIDWithName(Type, "1")
 	assert.Equal(t, cfg.Processors[id1],
 		&cfconfig.Config{
+			CollectorInstances:         1,
 			DecisionWait:               30 * time.Second,
 			SpansPerSecond:             0,
 			NumTraces:                  100000,
-			ProcessorSettings:          &ps1,
 			ProbabilisticFilteringRate: &probFilteringRate,
 			TraceRejectCfgs: []cfconfig.TraceRejectCfg{
 				{
@@ -99,15 +97,18 @@ func TestLoadConfig(t *testing.T) {
 			},
 		})
 
-	id2 := config.NewComponentIDWithName("cascading_filter", "2")
-	ps2 := config.NewProcessorSettings(id2)
+	id2 := component.NewIDWithName(Type, "2")
+	priorSpansRate2 := int32(600)
+	priorHistorySize2 := uint64(100)
 	assert.Equal(t, cfg.Processors[id2],
 		&cfconfig.Config{
-			ProcessorSettings:           &ps2,
+			CollectorInstances:          1,
 			DecisionWait:                10 * time.Second,
 			NumTraces:                   100,
 			ExpectedNewTracesPerSec:     10,
 			SpansPerSecond:              1000,
+			HistorySize:                 &priorHistorySize2,
+			PriorSpansRate:              &priorSpansRate2,
 			ProbabilisticFilteringRatio: &probFilteringRatio,
 			TraceRejectCfgs: []cfconfig.TraceRejectCfg{
 				{
@@ -142,11 +143,10 @@ func TestLoadConfig(t *testing.T) {
 					SpansPerSecond: 35,
 				},
 				{
-					Name:           "test-policy-5",
-					SpansPerSecond: 123,
-					NumericAttributeCfg: &cfconfig.NumericAttributeCfg{
-						Key: "key1", MinValue: 50, MaxValue: 100},
-					InvertMatch: true,
+					Name:                "test-policy-5",
+					SpansPerSecond:      123,
+					NumericAttributeCfg: &cfconfig.NumericAttributeCfg{Key: "key1", MinValue: 50, MaxValue: 100},
+					InvertMatch:         true,
 				},
 				{
 					Name:           "test-policy-6",

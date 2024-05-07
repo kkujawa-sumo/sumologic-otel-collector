@@ -1,6 +1,6 @@
 # Sumo Logic Extension
 
-**This extension is experimental and may receive breaking changes at any time.**
+**Stability level**: Beta
 
 This extension is to be used as part of Sumo Logic collector in conjuction with
 [`sumologicexporter`][sumologicexporter] in order to export telemetry data to
@@ -28,17 +28,18 @@ and can be used as an authenticator for the
 
 ## Configuration
 
-- `access_id`: (required) access ID for Sumo Logic service, see
+- `installation_token`: (required) collector installation token for the Sumo Logic service, see
   [help][credentials_help] for more details
-- `access_key`: (required) access key for Sumo Logic service, see
-  [help][credentials_help] for more details
-- `collector_name`: name that will be used for registration; by default it is a
-   hostname followed by UUID
+- `collector_name`: name that will be used for registration; by default the hostname is used. In the event of a conflict, a timestamp will be appended to the name. See [here][clobber] for more information.
 - `collector_description`: collector description that will be used for registration
 - `collector_category`: collector category that will be used for registration
 - `collector_fields`: a map of key value pairs that will be used as collector
   fields that will be used for registration.
   For more information on this subject please visit [this help document][fields_help]
+- `discover_collector_tags`: defines whether to auto-discover collector metadata
+  tags (for local services, e.g. mysql) (default: `true`)
+
+  **NOTE**: collector metadata tag auto-discovery is an alpha feature.
 - `api_base_url`: base API URL that will be used for creating API requests,
   see [API URLs](#api-urls) details
   (default: `https://open-collectors.sumologic.com`)
@@ -47,30 +48,39 @@ and can be used as an authenticator for the
 - `collector_credentials_directory`: directory where state files with registration
   info will be stored after successful collector registration
   (default: `$HOME/.sumologic-otel-collector`)
-- `clobber`: defines whether to delete any existing collector with the same name
-  and create a new one upon registration (default: `false`)
+- `clobber`: defines whether to delete any existing collector with the same name. See [here][clobber] for more information.
+- `force_registration`: defines whether to force registration every time the
+  collector starts.
+  This will cause the collector to not look at the locally stored credentials
+  and to always reach out to API to register itself. (default: `false`)
+
+  **NOTE**: if clobber is unset (default) then setting this to true will create
+  a new collector (with new unique name) on Sumo UI on every collector start
+  and create a new one upon registration.
 - `ephemeral`: defines whether the collector will be deleted after 12 hours
   of inactivity (default: `false`)
-- `time_zone`: defines the time zone of the collector. For a list of all possible
-  values, refer to the `TZ` column in
+- `time_zone`: defines the time zone of the collector, for example "America/Los_Angeles".
+  For a list of all possible values, refer to the `TZ identifier` column in
   https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List
 - `backoff`: defines backoff mechanism for retry in case of failed registration.
   [Exponential algorithm](https://pkg.go.dev/github.com/cenkalti/backoff/v4#ExponentialBackOff) is being used.
   - `initial_interval` - initial interval of backoff (default: `500ms`)
   - `max_interval` - maximum interval of backoff (default: `1m`)
   - `max_elapsed_time` - time after which registration fails definitely (default: `15m`)
+  - `sticky_session_enabled` - default value is `false`
 
-[credentials_help]: https://help.sumologic.com/Manage/Security/Access-Keys
-[fields_help]: https://help.sumologic.com/Manage/Fields
+[credentials_help]: https://help.sumologic.com/docs/manage/security/installation-tokens
+[fields_help]: https://help.sumologic.com/docs/manage/fields
+[clobber]: https://help.sumologic.com/docs/send-data/installed-collectors/collector-installation-reference/force-collectors-name-clobber/
 
 ## Example Config
 
 ```yaml
 extensions:
   sumologic:
-    access_id: aaa
-    access_key: bbbbbbbbbbbbbbbbbbbbbb
+    installation_token: <token>
     collector_name: my_collector
+    time_zone: CET
 
 receivers:
   hostmetrics:
@@ -116,7 +126,7 @@ Here is a list of valid values for this configuration option:
 
 ## Storing credentials
 
-When collector is starting for the first time, Sumo Logic extension is using `access_key` and `access_id`
+When collector is starting for the first time, Sumo Logic extension is using the `installation_token`
 to register the collector with API.
 Upon registration, the extension gets collector credentials which are used to authenticate the collector
 when sending request to API (heartbeats, sending data etc).
@@ -128,7 +138,7 @@ set to `$HOME/.sumologic-otel-collector`.
 Name of that file that contains the credentials is created in the following manner:
 
 ```go
-filename := hash(collector_name, access_id, access_key, api_base_url)
+filename := hash(collector_name, installation_token, api_base_url)
 ```
 
 This mechanism allows to keep the state of the collector (whether it is registered or not).
@@ -137,3 +147,9 @@ When collector is restarting it checks if the state file exists in `collector_cr
 If one would like to register another collector on the same machine then `collector_name` configuration property
 has to be specified in order to register the collector under that specific name which will be used to create
 a separate state file.
+
+### Running the collector as systemd service
+
+Systemd services are often run as users without a home directory,
+so if the collector is run as such service, the credentials might not be stored properly. One should either make sure that the home directory exists for the user
+or change the store location to another directory.

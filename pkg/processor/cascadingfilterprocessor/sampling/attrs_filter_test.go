@@ -20,7 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 )
 
@@ -61,20 +62,20 @@ func TestAttributesFilter(t *testing.T) {
 	coo := newAttrsFilter([]attributeFilter{filterCooNothing})
 
 	fooTraces, fooAttrs := newTrace()
-	fooAttrs.InsertString("foo", "foobar")
+	fooAttrs.PutStr("foo", "foobar")
 
 	fooNumTraces, fooNumAttrs := newTrace()
-	fooNumAttrs.InsertInt("foo", 130)
+	fooNumAttrs.PutInt("foo", 130)
 
 	fooBarTraces, fooBarAttrs := newTrace()
-	fooBarAttrs.InsertString("foo", "foobar")
-	fooBarAttrs.InsertString("bar", "bazbar")
+	fooBarAttrs.PutStr("foo", "foobar")
+	fooBarAttrs.PutStr("bar", "bazbar")
 
 	booTraces, booAttrs := newTrace()
-	booAttrs.InsertString("bar", "bazboo")
+	booAttrs.PutStr("bar", "bazboo")
 
 	cooTraces, cooAttrs := newTrace()
-	cooAttrs.InsertString("coo", "fsdkfjsdkljsda")
+	cooAttrs.PutStr("coo", "fsdkfjsdkljsda")
 
 	cases := []struct {
 		Desc      string
@@ -132,23 +133,23 @@ func TestAttributesFilter(t *testing.T) {
 	}
 }
 
-func newTrace() (*TraceData, pdata.AttributeMap) {
+func newTrace() (*TraceData, pcommon.Map) {
 	endTs := time.Now().UnixNano()
 	startTs := endTs - 100000
 
-	var traceBatches []pdata.Traces
+	var traceBatches []ptrace.Traces
 
-	traces := pdata.NewTraces()
+	traces := ptrace.NewTraces()
 	rs := traces.ResourceSpans().AppendEmpty()
-	ils := rs.InstrumentationLibrarySpans().AppendEmpty()
+	ss := rs.ScopeSpans().AppendEmpty()
 
-	spans := ils.Spans()
+	spans := ss.Spans()
 	spans.EnsureCapacity(1)
 
 	span := spans.AppendEmpty()
 	span.SetName("fooname")
-	span.SetStartTimestamp(pdata.Timestamp(startTs))
-	span.SetEndTimestamp(pdata.Timestamp(endTs))
+	span.SetStartTimestamp(pcommon.Timestamp(startTs))
+	span.SetEndTimestamp(pcommon.Timestamp(endTs))
 
 	traceBatches = append(traceBatches, traces)
 

@@ -1,5 +1,7 @@
 # Sumo Logic Exporter
 
+**Stability level**: Beta
+
 This exporter supports sending logs and metrics data to [Sumo Logic](https://www.sumologic.com/).
 
 We strongly recommend to use this exporter with [sumologicextension](../../extension/sumologicextension/README.md).
@@ -15,97 +17,51 @@ exporters:
     # if sumologicextension is not being used, the endpoint is required
     endpoint: <HTTP_Source_URL>
     # Compression encoding format, empty string means no compression, default = gzip
+    # DEPRECATION NOTICE: compress_encoding (reason: use compression)
     compress_encoding: {gzip, deflate, ""}
+    # Compression encoding format, empty string means no compression, default = gzip
+    compression: {gzip, zstd, deflate, ""}
     # max HTTP request body size in bytes before compression (if applied),
+    # NOTE: this limit does not apply to data sent in otlp format,
+    #   to limit size of otlp requests, please use the batch processor:
+    #   https://github.com/open-telemetry/opentelemetry-collector/tree/v0.99.0/processor/batchprocessor
     # default = 1_048_576 (1MB)
     max_request_body_size: <max_request_body_size>
 
-    # format to use when sending logs to Sumo, default = otlp,
+    # format to use when sending logs to Sumo Logic, default = otlp,
     # NOTE: only `otlp` is supported when used with sumologicextension
     log_format: {json, text, otlp}
 
-    # format to use when sending metrics to Sumo, default = otlp,
+    # format to use when sending metrics to Sumo Logic, default = otlp,
     # NOTE: only `otlp` is supported when used with sumologicextension
-    metric_format: {carbon2, graphite, otlp, prometheus}
+    metric_format: {otlp, prometheus}
 
-    # format to use when sending traces to Sumo,
+    # Decompose OTLP Histograms into individual metrics, similar to how they're represented in Prometheus format.
+    # The Sumo OTLP source currently doesn't support Histograms, and they are quietly dropped. This option produces
+    # metrics similar to when metric_format is set to prometheus.
+    # default = false
+    decompose_otlp_histograms: {true, false}
+
+    # format to use when sending traces to Sumo Logic,
     # currently only otlp is supported
     trace_format: {otlp}
 
     # timeout is the timeout for every attempt to send data to the backend,
-    # maximum connection timeout is 55s, default = 5s
+    # maximum connection timeout is 55s, default = 30s
     timeout: <timeout>
 
-    # defines if timestamp for logs should be set to 0,
-    # it indicates that backend will extract timestamp from logs,
-    # this option affects OTLP format only
-    # default = true
-    clear_logs_timestamp: {true, false}
-
-    # For below described source and graphite template related configuration,
-    # please refer to "Source templates" documentation chapter from this document.
-
-    # desired source category, useful if you want to override the source category
-    # configured for the source.
-    source_category: <source_category>
-    # desired source name, useful if you want to override the source name
-    # configured for the source.
-    source_name: <source_name>
-    # desired host name, useful if you want to override the source host
-    # configured for the source.
-    source_host: <source_host>
-    # template for Graphite format, applied only if metric_format is set to graphite;
-    # source templating is going to be applied,
-    # default = `%{_metric_}`
-    graphite_template: <graphite_template>
-
-    json_logs:
-      # defines which key will be used to attach the log body at.
-      # This option affects JSON log format only.
-      # By default this is "log".
-      log_key: <log>
-      # defines whether to include a timestamp field when sending
-      # JSON logs, which would contain UNIX epoch timestamp in milliseconds.
-      # This option affects JSON log format only.
-      # default = true.
-      add_timestamp: {true, false}
-      # when add_timestamp is set to true then this key defines what is the name
-      # of the timestamp key.
-      # default = "timestamp".
-      timestamp_key: <timestamp_key>
-      # When flatten_body is set to true and log is a map,
-      # log's body is going to be flattened and `log_key` won't be used
-      # default = false
-      flatten_body: {true, false}
-
-    # translate_attributes specifies whether attributes should be translated
-    # from OpenTelemetry to Sumo conventions;
-    # see "Attribute translation" documentation chapter from this document,
-    # default = true
-    translate_attributes: {true, false}
-
-    # Specifies whether telegraf metric names should be translated to match
-    # Sumo conventions expected in Sumo host related apps (for example
-    # `procstat_num_threads` => `Proc_Threads` or `cpu_usage_irq` => `CPU_Irq`).
-    # See `translate_metrics.go` for full list of translations.
-    # default = true
-    translate_telegraf_attributes: {true, false}
-
-    # list of regexes for attributes which should be sent as metadata,
-    # use OpenTelemetry attribute names, see "Attribute translation" documentation
-    # chapter from this document.
-    metadata_attributes:
-      - <regex1>
-      - <regex2>
+    # defines client name used for Sumo Logic statistics
+    # default = "otelcol"
+    client: <client name>
 
     # instructs sumologicexporter to use an edpoint automatically generated by
     # sumologicextension;
-    # to use direct endpoint, set it to "" and set the endpoint configuration
+    # to use direct endpoint, set it `auth` to `null` and set the endpoint configuration
     # option;
     # see sumologicextension documentation for details
     # default = sumologic
     auth:
-      authenticator: {sumologic, ""}
+      authenticator: <sumologicextension_name>
 
     # for below described queueing and retry related configuration please refer to:
     # https://github.com/open-telemetry/opentelemetry-collector/blob/main/exporter/exporterhelper/README.md#configuration
@@ -128,114 +84,40 @@ exporters:
       # number of consumers that dequeue batches; ignored if enabled is false,
       # default = 10
       num_consumers: <num_consumers>
+      # when set, enables persistence and uses the component specified as a storage extension for the persistent queue
+      # make sure to configure and add a `file_storage` extension in `service.extensions`.
+      # default = None
+      storage: <storage_name>
       # maximum number of batches kept in memory before data;
-      # ignored if enabled is false, default = 5000
+      # ignored if enabled is false, default = 1000
       #
       # user should calculate this as num_seconds * requests_per_second where:
       # num_seconds is the number of seconds to buffer in case of a backend outage,
       # requests_per_second is the average number of requests per seconds.
       queue_size: <queue_size>
+
+    # defines if sticky session support is enable
+    # more details about sticky sessions for ALB could be found here:
+    # https://docs.aws.amazon.com/elasticloadbalancing/latest/application/sticky-sessions.html
+    # default = false
+    sticky_session_enabled: {true, false}
 ```
 
-[sumologicextension]: ./../../extension/sumologicextension
+## Metrics
 
-## Attribute translation
+The Sumo Logic Exporter exposes the following metrics:
 
-Attribute translation changes some of the attribute keys from OpenTelemetry convention to Sumo convention.
-For example, OpenTelemetry convention for the attribute containing Kubernetes pod name is `k8s.pod.name`,
-but Sumo expects it to be in attribute named `pod`.
+- `otelcol_exporter_requests_bytes` (`counter`) - total size of HTTP requests (in bytes)
+- `otelcol_exporter_requests_duration` (`counter`) - duration of HTTP requests (in milliseconds)
+- `otelcol_exporter_requests_records` (`counter`) - total size of HTTP requests (in number of records)
+- `otelcol_exporter_requests_sent` (`counter`) - number of HTTP requests
 
-If attribute with target name eg. `pod` already exists,
-translation is not being done for corresponding attribute (`k8s.pod.name` in this example).
+All of the above metrics have the following dimensions:
 
-This feature is turned on by default.
-To turn it off, set the `translate_attributes` configuration option to `false`.
-Note that this may cause some of Sumo apps, built-in dashboards to not work correctly.
-
-Below is a list of all attribute keys that are being translated.
-
-| OTC key name              | Sumo key name      |
-|---------------------------|--------------------|
-| `cloud.account.id`        | `AccountId`        |
-| `cloud.availability_zone` | `AvailabilityZone` |
-| `cloud.platform`          | `aws_service`      |
-| `cloud.region`            | `Region`           |
-| `host.id`                 | `InstanceId`       |
-| `host.name`               | `host`             |
-| `host.type`               | `InstanceType`     |
-| `k8s.cluster.name`        | `Cluster`          |
-| `k8s.container.name`      | `container`        |
-| `k8s.daemonset.name`      | `daemonset`        |
-| `k8s.deployment.name`     | `deployment`       |
-| `k8s.namespace.name`      | `namespace`        |
-| `k8s.node.name`           | `node`             |
-| `k8s.service.name`        | `service`          |
-| `k8s.pod.hostname`        | `host`             |
-| `k8s.pod.name`            | `pod`              |
-| `k8s.pod.uid`             | `pod_id`           |
-| `k8s.replicaset.name`     | `replicaset`       |
-| `k8s.statefulset.name`    | `statefulset`      |
-| `service.name`            | `service`          |
-| `file.path.resolved`      | `_sourceName`      |
-
-## Source Templates
-
-> **IMPORTANT NOTE**:
->
-> When using non-`OTLP` based format (e.g. `JSON` for logs) metadata attributes
-> used in source templates have to have a regex defined in
-> `metadata_attributes` that would match them.
->
-> Otherwise the attributes will not be available during source templates rendering.
-> Hence this is correct:
->
-> ```yaml
-> source_name: "%{k8s.namespace.name}.%{k8s.pod.name}.%{k8s.container.name}"
-> source_category: "%{k8s.namespace.name}/%{k8s.pod.pod_name}"
-> source_host: '%{k8s.pod.hostname}'
-> metadata_attributes:
->   - k8s.*
->   - some_other_metadata_regex.*
-> ```
->
-> While is **not**:
->
-> ```yaml
-> source_name: "%{k8s.namespace.name}.%{k8s.pod.name}.%{k8s.container.name}"
-> source_category: "%{k8s.namespace.name}/%{k8s.pod.pod_name}"
-> source_host: '%{k8s.pod.hostname}'
-> metadata_attributes:
->   - host
->   - pod
->   - some_other_metadata_regex.*
-> ```
->
-> At the same time source related metadata attributes, i.e.:
->
-> - `_sourceCategory`
-> - `_sourceHost`
-> - `_sourceName`
->
-> are always available in the templates (when a corresponding resource attribute
-> is set for processed entry) but are **never** sent to Sumo Logic.
->
-> In order to set those metadata attributes use `source_category`, `source_host`
-> and `source_name` configuration option which will set the corresponding
-> `X-Sumo-...` HTTP header.
-
-You can specify a template with an attribute for `source_category`, `source_name`,
-`source_host` or `graphite_template` using `%{attr_name}`.
-
-For example, when there is an attribute `my_attr`: `my_value`, `metrics/%{my_attr}`
-would be expanded to `metrics/my_value`.
-Use OpenTelemetry attribute names, even when [attribute translation](#attribute-translation)
-is turned on.
-
-For `graphite_template`, in addition to above, `%{_metric_}` is going to be replaced
-with metric name.
-
-If an attribute is not found, it is replaced with `undefined`.
-For example, `%{existing_attr}/%{nonexistent_attr}` becomes `value-of-existing-attr/undefined`.
+- `endpoint` - endpoint address
+- `exporter` - exporter name
+- `pipeline` - pipeline name (`logs`, `metrics` or `traces`)
+- `status_code` - HTTP response status code (`0` in case of error)
 
 ## Example Configuration
 
@@ -244,8 +126,7 @@ For example, `%{existing_attr}/%{nonexistent_attr}` becomes `value-of-existing-a
 ```yaml
 extensions:
   sumologic:
-    access_id: aaa
-    access_key: bbbbbbbbbbbbbbbbbbbbbb
+    installation_token: <token>
     collector_name: my_collector
 
 receivers:
@@ -256,17 +137,19 @@ receivers:
 
 exporters:
   sumologic:
+
+processors:
+  source:
     source_category: "custom category"
     source_name: "custom name"
     source_host: "%{k8s.pod.name}"
-    metadata_attributes:
-      - k8s.*
 
 service:
   extensions: [sumologic]
   pipelines:
     metrics:
       receivers: [hostmetrics]
+      processors: [source]
       exporters: [sumologic]
 ```
 
@@ -280,9 +163,41 @@ exporters:
     max_request_body_size: "1_048_576"  # 1MB
     log_format: "text"
     metric_format: "prometheus"
+processors:
+  source:
     source_category: "custom category"
     source_name: "custom name"
     source_host: "custom host"
-    metadata_attributes:
-      - k8s.*
+```
+
+### Example with persistent queue
+
+```yaml
+exporters:
+  sumologic:
+    endpoint: http://localhost:3000
+    metric_format: prometheus
+    sending_queue:
+      enabled: true
+      storage: file_storage
+
+extensions:
+  file_storage:
+    directory: .
+
+receivers:
+  hostmetrics:
+    collection_interval: 3s
+    scrapers:
+      load:
+
+service:
+  extensions:
+  - file_storage
+  pipelines:
+    metrics:
+      exporters:
+      - sumologic
+      receivers:
+      - hostmetrics
 ```

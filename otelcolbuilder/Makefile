@@ -1,10 +1,39 @@
 BINARY_NAME ?= otelcol-sumo
-BUILDER_VERSION ?= 0.40.0
+BUILDER_VERSION ?= 0.99.0
+FIPS_SUFFIX ?= ""
 BUILDER_REPO ?= github.com/open-telemetry/opentelemetry-collector
-BUILDER_BIN_PATH ?= $(HOME)/bin/opentelemetry-collector-builder
-VERSION ?= "$(shell git describe --tags --abbrev=10)"
 GO ?= go
+GOTAGS ?=
+
+ifeq ($(OS),Windows_NT)
+	OS=windows
+endif
+
+ifeq ($(OS),windows)
+	BUILDER_BIN_EXT ?= .exe
+	MAKE := "$(shell cygpath '$(MAKE)')"
+endif
+
 OS ?= $(shell uname -s | tr A-Z a-z)
+ARCH ?= $(shell uname -m | sed s/aarch64/arm64/ | sed s/x86_64/amd64/)
+
+BUILDER_BIN_NAME ?= opentelemetry-collector-builder$(BUILDER_BIN_EXT)
+BUILDER_BIN_PATH ?= $(HOME)/bin
+
+INSTALLED_BUILDER_VERSION := $(shell $(BUILDER_BIN_NAME) version 2>&1)
+
+# Settings for macOS builds
+ifeq ($(OS),darwin)
+	AC_USERNAME ?= otel-mac-certs@sumologic.com
+	AC_PASSWORD ?= $(shell echo $$AC_PASSWORD)
+	DEVELOPER_TEAM_ID ?= 8F28635Z7X
+	DEVELOPER_SIGNING_IDENTITY ?= Developer ID Application: Sumo Logic, Inc. ($(DEVELOPER_TEAM_ID))
+	DMG_VOLUME_NAME ?= Sumo Logic Distribution for OpenTelemetry Collector
+endif
+
+# Add additional LDFLAGS
+# ex: to get a staticly executable with CGO use EXTRA_LDFLAGS="-linkmode external -extldflags '-static'"
+LDFLAGS:=$(EXTRA_LDFLAGS)
 
 # Builds for darwin need to be built with CGO_ENABLED set to 1 because some telegraf
 # plugins that are used within the telegrafreceiver are implemented with CGO.
@@ -21,32 +50,45 @@ else
 CGO_ENABLED ?= 0
 endif
 
-X=$(shell opentelemetry-collector-builder version 2>&1)
+# We don't want to strip symbols for FIPS builds, as they're useful for verifying the build
+ifeq ($(FIPS_SUFFIX),"")
+GOEXPERIMENT=""
+LDFLAGS+= -s -w
+# We want to use boringcrypto for fips setup
+else
+ifeq ($(shell go env GOOS),windows)
+GOEXPERIMENT=systemcrypto
+GOTAGS := $(GOTAGS) requirefips
+LDFLAGS+= -w
+else
+GOEXPERIMENT=boringcrypto
+LDFLAGS+= -w
+endif
+endif
 
-.PHONY: install-builder-with-go-install
-install-builder-with-go-install:
-	@echo "Installing $(BUILDER_REPO)@$(BUILDER_VERSION)..."
-	go install $(BUILDER_REPO)@v$(BUILDER_VERSION)
-	@$(MAKE) ensure-correct-builder-version
+# We want to enforce go dns for all types of binaries. The FIPS binaries are built with CGO enabled and use
+# the CGO resolver. This has caused a DNS resolution error for .local domains in our K8s containers.
+# ref: https://pkg.go.dev/net#hdr-Name_Resolution
+GOTAGS := $(GOTAGS) netgo
 
 .PHONY: _install-bin
 _install-bin:
-	mkdir -p $(HOME)/bin && \
-	curl -L -o $(BUILDER_BIN_PATH) https://$(BUILDER_REPO)/releases/download/cmd%2Fbuilder%2Fv$(BUILDER_VERSION)/ocb_$(BUILDER_VERSION)_$(PLATFORM)_amd64 && \
-	chmod +x $(BUILDER_BIN_PATH)
+	@mkdir -p "$(BUILDER_BIN_PATH)"
+	curl -L -o "$(BUILDER_BIN_PATH)/$(BUILDER_BIN_NAME)" https://$(BUILDER_REPO)/releases/download/cmd/builder/v$(BUILDER_VERSION)/ocb_$(BUILDER_VERSION)_$(PLATFORM)_$(ARCH)$(BUILDER_BIN_EXT)
+	@chmod +x "$(BUILDER_BIN_PATH)/$(BUILDER_BIN_NAME)"
 	@$(MAKE) ensure-correct-builder-version
 
 .PHONY: install-builder
 install-builder:
-	@echo "Installing $(BUILDER_REPO)@$(BUILDER_VERSION)..."
+	@echo "Installing $(BUILDER_REPO)/cmd/builder@v$(BUILDER_VERSION)... (in $(BUILDER_BIN_PATH))"
 	@$(MAKE) _install-bin PLATFORM=$(OS)
 
 
 .PHONY: ensure-correct-builder-version
 ensure-correct-builder-version:
-ifneq ($(lastword $(shell opentelemetry-collector-builder version 2>&1)),$(BUILDER_VERSION))
+ifneq ($(lastword $(INSTALLED_BUILDER_VERSION)),$(BUILDER_VERSION))
 	@$(error Installed opentelemetry-collector-builder version \
-		"$(shell opentelemetry-collector-builder version 2>/dev/null)" \
+		"$(INSTALLED_BUILDER_VERSION)" \
 		does not match the requested "$(BUILDER_VERSION)" \
 		Please check if "$(BUILDER_BIN_PATH)" can be found in your PATH \
 		and if not, then install it using 'make install-builder' from otelcolbuilder's directory\
@@ -59,36 +101,74 @@ endif
 
 .PHONY: _builder
 _builder:
+	$(eval VERSION ?= $(shell git describe --tags --abbrev=5 --match "v[0-9]*"))
 # Need to specify go path because otherwise opentelemetry-collector-builder
 # uses /usr/bin/go which on Github Actions is using preinstalled 1.15.12 by default.
-	CGO_ENABLED=$(CGO_ENABLED) opentelemetry-collector-builder \
+	CGO_ENABLED=$(CGO_ENABLED) $(BUILDER_BIN_NAME) \
 		--go $(GO) \
-		--version $(VERSION) \
+		--version "$(VERSION)$(FIPS_SUFFIX)" \
 		--config .otelcol-builder.yaml \
 		--output-path ./cmd \
-		--skip-compilation=$(SKIP_COMPILATION) \
-		--name $(BINARY_NAME)
+		--skip-compilation=$(SKIP_COMPILATION)
+
+.PHONY: _gobuild
+_gobuild:
+	(cd cmd && \
+		CGO_ENABLED=$(CGO_ENABLED) GOEXPERIMENT=$(GOEXPERIMENT) go build -v \
+		-tags "$(GOTAGS)" \
+		-ldflags="$(LDFLAGS)" \
+		-trimpath \
+		-o ./$(BINARY_NAME)$(BUILDER_BIN_EXT) . \
+	)
+	chmod +x ./cmd/$(BINARY_NAME)$(BUILDER_BIN_EXT)
+
+.PHONY: _gobuild_debug
+_gobuild_debug:
+	(cd cmd && \
+		CGO_ENABLED=$(CGO_ENABLED) GOEXPERIMENT=$(GOEXPERIMENT) go build -v \
+		-tags "$(GOTAGS)" \
+		-race \
+		-gcflags "all=-N -l" \
+		-o ./$(BINARY_NAME)-debug$(BUILDER_BIN_EXT) . \
+	)
+	chmod +x ./cmd/$(BINARY_NAME)-debug$(BUILDER_BIN_EXT)
 
 .PHONY: build
 build: ensure-correct-builder-version
 # Since builder doesn't allow adding build tags, let's just skip the compilation
 # and run 'go build ...' by hand.
-	@$(MAKE) _builder SKIP_COMPILATION=true
-	(cd cmd && \
-		CGO_ENABLED=$(CGO_ENABLED) go build -v \
-		-ldflags="-s -w" \
-		-tags enable_unstable \
-		-trimpath -o ./$(BINARY_NAME) . \
-	)
-	chmod +x ./cmd/$(BINARY_NAME)
+	@$(MAKE) generate-sources
+	@$(MAKE) _gobuild
+
+.PHONY: build-debug
+build-debug: ensure-correct-builder-version
+# Since builder doesn't allow adding build tags, let's just skip the compilation
+# and run 'go build ...' by hand.
+	@$(MAKE) generate-sources
+	@$(MAKE) _gobuild_debug
+
+.PHONY: build-fips
+build-fips:
+	docker volume create build-fips
+	docker build --platform linux/amd64 -t otelcol-sumo-builder-fips -f ./build-fips/Dockerfile ./build-fips
+	docker run -it --platform linux/amd64 --rm -v build-fips:/root/build -v $(PWD)/../:/root/workspace -w /root/workspace --tmpfs /tmp otelcol-sumo-builder-fips
 
 .PHONY: generate-sources
 generate-sources:
 	@$(MAKE) _builder SKIP_COMPILATION=true
+	# the changes below allow us to use a custom config provider
+	# this requires some additions to the main.go file generated by the builder
+	cd cmd && go get github.com/SumoLogic/sumologic-otel-collector/pkg/configprovider/globprovider@v0.0.0-00010101000000-000000000000
+	cd cmd && go get github.com/SumoLogic/sumologic-otel-collector/pkg/configprovider/opampprovider@v0.0.0-00010101000000-000000000000
+	patch cmd/main.go cmd/00_main.go.patch
+	patch cmd/main.go cmd/01_main.go.patch
+	patch cmd/main_windows.go cmd/main_windows.go.patch
 
 .PHONY: test
-test: install-builder generate-sources
-	@$(MAKE) -C cmd test
+test:
+	@$(MAKE) ensure-correct-builder-version || $(MAKE) install-builder
+	@$(MAKE) generate-sources
+	CGO_ENABLED=${CGO_ENABLED} GOEXPERIMENT=$(GOEXPERIMENT) $(MAKE) -C cmd test
 
 .PHONY: lint
 lint: install-builder generate-sources
@@ -99,24 +179,81 @@ mod-download-all:
 	@echo "No need to run go mod download or tidy on generated sources in $(PWD)"
 
 .PHONY: otelcol-sumo-all-sys
-otelcol-sumo-all-sys: otelcol-sumo-darwin_amd64 otelcol-sumo-linux_amd64 otelcol-sumo-windows_amd64
+otelcol-sumo-all-sys: otelcol-sumo-darwin_amd64 otelcol-sumo-darwin_arm64 otelcol-sumo-linux_amd64 otelcol-sumo-windows_amd64
 
 .PHONY: otelcol-sumo-darwin_amd64
 otelcol-sumo-darwin_amd64:
-	GOOS=darwin  GOARCH=amd64 $(MAKE) build BINARY_NAME=otelcol-sumo-darwin_amd64
+	GOOS=darwin  GOARCH=amd64 $(MAKE) build BINARY_NAME=$(BINARY_NAME)$(FIPS_SUFFIX)-darwin_amd64
+
+.PHONY: otelcol-sumo-darwin_arm64
+otelcol-sumo-darwin_arm64:
+	GOOS=darwin  GOARCH=arm64 $(MAKE) build BINARY_NAME=$(BINARY_NAME)$(FIPS_SUFFIX)-darwin_arm64
+
+.PHONY: darwin-sign
+darwin-sign: BINARY_PATH = cmd/$(BINARY_NAME)
+darwin-sign: DMG_PATH = $(BINARY_PATH).dmg
+darwin-sign:
+	$(eval DMG_SOURCE_DIR = $(shell mktemp -d -t "$(BINARY_NAME)-dmg"))
+	codesign --timestamp --options=runtime -s "$(DEVELOPER_SIGNING_IDENTITY)" -v "$(BINARY_PATH)"
+	cp "$(BINARY_PATH)" "$(DMG_SOURCE_DIR)"
+	hdiutil create "$(DMG_PATH)" -ov -volname "$(DMG_VOLUME_NAME)" -fs APFS -format UDZO -srcfolder "$(DMG_SOURCE_DIR)"
+	xcrun notarytool submit --apple-id "$(AC_USERNAME)" --password "$(AC_PASSWORD)" --team-id "$(DEVELOPER_TEAM_ID)" --progress --wait "$(DMG_PATH)"
+	xcrun stapler staple "$(DMG_PATH)"
+
+.PHONY: darwin_amd64-sign
+darwin_amd64-sign: BINARY_NAME=otelcol-sumo-darwin_amd64
+darwin_amd64-sign: darwin-sign
+
+.PHONY: darwin_arm64-sign
+darwin_arm64-sign: BINARY_NAME=otelcol-sumo-darwin_arm64
+darwin_arm64-sign: darwin-sign
 
 .PHONY: otelcol-sumo-linux_amd64
 otelcol-sumo-linux_amd64:
-	GOOS=linux   GOARCH=amd64 $(MAKE) build BINARY_NAME=otelcol-sumo-linux_amd64
+	GOOS=linux   GOARCH=amd64 $(MAKE) build BINARY_NAME=$(BINARY_NAME)$(FIPS_SUFFIX)-linux_amd64
 
 .PHONY: otelcol-sumo-linux_arm64
 otelcol-sumo-linux_arm64:
-	GOOS=linux   GOARCH=arm64 $(MAKE) build BINARY_NAME=otelcol-sumo-linux_arm64
+	GOOS=linux   GOARCH=arm64 $(MAKE) build BINARY_NAME=$(BINARY_NAME)$(FIPS_SUFFIX)-linux_arm64
 
 .PHONY: otelcol-sumo-linux_arm
 otelcol-sumo-linux_arm:
-	GOOS=linux   GOARCH=arm $(MAKE) build BINARY_NAME=otelcol-sumo-linux_arm
+	GOOS=linux   GOARCH=arm $(MAKE) build BINARY_NAME=$(BINARY_NAME)$(FIPS_SUFFIX)-linux_arm
 
 .PHONY: otelcol-sumo-windows_amd64
 otelcol-sumo-windows_amd64:
-	GOOS=windows GOARCH=amd64 $(MAKE) build BINARY_NAME=otelcol-sumo-windows_amd64.exe
+	GOOS=windows GOARCH=amd64 $(MAKE) build BINARY_NAME=$(BINARY_NAME)$(FIPS_SUFFIX)-windows_amd64
+
+MUSL_X_MAKE_REPO=https://github.com/richfelker/musl-cross-make.git
+MUSL_X_MAKE_REF=fe915821b652a7fa37b34a596f47d8e20bc72338
+
+musl-cross-make:
+	git clone $(MUSL_X_MAKE_REPO);
+	cd musl-cross-make && git checkout $(MUSL_X_MAKE_REF);
+	cp ./build-fips/config.mak ./musl-cross-make/config.mak;
+
+.PHONY: toolchain-linux_arm64
+toolchain-linux_arm64: musl-cross-make
+	TARGET=aarch64-linux-musl $(MAKE) -C musl-cross-make install
+
+.PHONY: toolchain-linux_amd64
+toolchain-linux_amd64: musl-cross-make
+	TARGET=x86_64-linux-musl $(MAKE) -C musl-cross-make install
+
+.PHONY: otelcol-sumo-linux-fips_arm64
+otelcol-sumo-linux-fips_arm64:
+	$(MAKE) toolchain-linux_arm64 OUTPUT=$(PWD)/toolchain_arm64 -j3
+	$(MAKE) otelcol-sumo-linux_arm64 \
+		FIPS_SUFFIX="-fips" \
+		CGO_ENABLED="1" \
+		CC="$(PWD)/toolchain_arm64/bin/aarch64-linux-musl-gcc" \
+		EXTRA_LDFLAGS="-linkmode external -extldflags '-static'"
+
+.PHONY: otelcol-sumo-linux-fips_amd64
+otelcol-sumo-linux-fips_amd64:
+	$(MAKE) toolchain-linux_amd64 OUTPUT=$(PWD)/toolchain_amd64 -j3
+	$(MAKE) otelcol-sumo-linux_amd64 \
+		FIPS_SUFFIX="-fips" \
+		CGO_ENABLED="1" \
+		CC="$(PWD)/toolchain_amd64/bin/x86_64-linux-musl-gcc" \
+		EXTRA_LDFLAGS="-linkmode external -extldflags '-static'"

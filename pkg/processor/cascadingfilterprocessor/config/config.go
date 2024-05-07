@@ -16,8 +16,6 @@ package config
 
 import (
 	"time"
-
-	"go.opentelemetry.io/collector/config"
 )
 
 // TraceAcceptCfg holds the common configuration to all sampling policies.
@@ -107,7 +105,10 @@ type TraceRejectCfg struct {
 
 // Config holds the configuration for cascading-filter-based sampling.
 type Config struct {
-	*config.ProcessorSettings `mapstructure:"-"`
+	// CollectorInstances is the number of collectors sharing single configuration for
+	// cascadingfilter processor. This number is used to calculate global and policy limits
+	// for spans_per_second. Default value is 1.
+	CollectorInstances uint `mapstructure:"collector_instances"`
 	// DecisionWait is the desired wait time from the arrival of the first span of
 	// trace until the decision about sampling it or not is evaluated.
 	DecisionWait time.Duration `mapstructure:"decision_wait"`
@@ -115,6 +116,9 @@ type Config struct {
 	// When set to zero (default value) - it is automatically calculated basing on the accept trace and
 	// probabilistic filtering rate (if present)
 	SpansPerSecond int32 `mapstructure:"spans_per_second"`
+	// PriorSpansRate specifies the budget for traces where decision was already made previously
+	// By default, it equals to half of SpansPerSecond
+	PriorSpansRate *int32 `mapstructure:"prior_spans_rate"`
 	// ProbabilisticFilteringRatio describes which part (0.0-1.0) of the SpansPerSecond budget
 	// is exclusively allocated for probabilistically selected spans
 	ProbabilisticFilteringRatio *float32 `mapstructure:"probabilistic_filtering_ratio"`
@@ -124,6 +128,9 @@ type Config struct {
 	// NumTraces is the number of traces kept on memory. Typically, most of the data
 	// of a trace is released after a sampling decision is taken.
 	NumTraces uint64 `mapstructure:"num_traces"`
+	// HistorySize is the number of past decisions kept in memory. The implementation uses LRU, so
+	// decisions for long-running spans are honored. By default it equals to NumTraces
+	HistorySize *uint64 `mapstructure:"history_size"`
 	// ExpectedNewTracesPerSec sets the expected number of new traces sending to the Cascading Filter processor
 	// per second. This helps with allocating data structures with closer to actual usage size.
 	ExpectedNewTracesPerSec uint64 `mapstructure:"expected_new_traces_per_sec"`

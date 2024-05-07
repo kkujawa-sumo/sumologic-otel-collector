@@ -18,8 +18,8 @@ import (
 	"context"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/processor"
 	"go.opentelemetry.io/collector/processor/processorhelper"
 )
 
@@ -35,30 +35,34 @@ const (
 	defaultSourceCategoryPrefix      = "kubernetes/"
 	defaultSourceCategoryReplaceDash = "/"
 
-	defaultAnnotationPrefix   = "k8s.pod.annotation."
-	defaultPodKey             = "k8s.pod.name"
-	defaultPodNameKey         = "k8s.pod.pod_name"
-	defaultPodTemplateHashKey = "k8s.pod.label.pod-template-hash"
+	defaultAnnotationPrefix          = "k8s.pod.annotation."
+	defaultNamespaceAnnotationPrefix = "k8s.namespace.annotation."
+	defaultPodKey                    = "k8s.pod.name"
+	defaultPodNameKey                = "k8s.pod.pod_name"
+	defaultPodTemplateHashKey        = "k8s.pod.label.pod-template-hash"
+	defaultContainerNameKey          = "k8s.container.name"
+
+	stabilityLevel = component.StabilityLevelBeta
 )
+
+var Type = component.MustNewType(typeStr)
 
 var processorCapabilities = consumer.Capabilities{MutatesData: true}
 
 // NewFactory returns a new factory for the Span processor.
-func NewFactory() component.ProcessorFactory {
-	return processorhelper.NewFactory(
-		typeStr,
+func NewFactory() processor.Factory {
+	return processor.NewFactory(
+		Type,
 		createDefaultConfig,
-		processorhelper.WithTraces(createTraceProcessor),
-		processorhelper.WithMetrics(createMetricsProcessor),
-		processorhelper.WithLogs(createLogsProcessor),
+		processor.WithTraces(createTracesProcessor, stabilityLevel),
+		processor.WithMetrics(createMetricsProcessor, stabilityLevel),
+		processor.WithLogs(createLogsProcessor, stabilityLevel),
 	)
 }
 
 // createDefaultConfig creates the default configuration for processor.
-func createDefaultConfig() config.Processor {
-	ps := config.NewProcessorSettings(config.NewComponentID(typeStr))
+func createDefaultConfig() component.Config {
 	return &Config{
-		ProcessorSettings:         &ps,
 		Collector:                 defaultCollector,
 		SourceHost:                defaultSourceHost,
 		SourceName:                defaultSourceName,
@@ -66,13 +70,15 @@ func createDefaultConfig() config.Processor {
 		SourceCategoryPrefix:      defaultSourceCategoryPrefix,
 		SourceCategoryReplaceDash: defaultSourceCategoryReplaceDash,
 
-		AnnotationPrefix:   defaultAnnotationPrefix,
-		PodKey:             defaultPodKey,
-		PodNameKey:         defaultPodNameKey,
-		PodTemplateHashKey: defaultPodTemplateHashKey,
+		AnnotationPrefix:          defaultAnnotationPrefix,
+		NamespaceAnnotationPrefix: defaultNamespaceAnnotationPrefix,
+		PodKey:                    defaultPodKey,
+		PodNameKey:                defaultPodNameKey,
+		PodTemplateHashKey:        defaultPodTemplateHashKey,
 
 		ContainerAnnotations: ContainerAnnotationsConfig{
-			Enabled: false,
+			Enabled:          false,
+			ContainerNameKey: defaultContainerNameKey,
 			Prefixes: []string{
 				"sumologic.com/",
 			},
@@ -81,17 +87,19 @@ func createDefaultConfig() config.Processor {
 }
 
 // CreateTraceProcessor creates a trace processor based on this config.
-func createTraceProcessor(
-	_ context.Context,
-	params component.ProcessorCreateSettings,
-	cfg config.Processor,
-	next consumer.Traces) (component.TracesProcessor, error) {
+func createTracesProcessor(
+	ctx context.Context,
+	params processor.CreateSettings,
+	cfg component.Config,
+	next consumer.Traces) (processor.Traces, error) {
 
 	oCfg := cfg.(*Config)
 
-	sp := newSourceProcessor(oCfg)
+	sp := newSourceProcessor(params, oCfg)
 
 	return processorhelper.NewTracesProcessor(
+		ctx,
+		params,
 		cfg,
 		next,
 		sp.ProcessTraces,
@@ -101,15 +109,17 @@ func createTraceProcessor(
 
 // createMetricsProcessor creates a metrics processor based on this config
 func createMetricsProcessor(
-	_ context.Context,
-	params component.ProcessorCreateSettings,
-	cfg config.Processor,
+	ctx context.Context,
+	params processor.CreateSettings,
+	cfg component.Config,
 	next consumer.Metrics,
-) (component.MetricsProcessor, error) {
+) (processor.Metrics, error) {
 	oCfg := cfg.(*Config)
 
-	sp := newSourceProcessor(oCfg)
+	sp := newSourceProcessor(params, oCfg)
 	return processorhelper.NewMetricsProcessor(
+		ctx,
+		params,
 		cfg,
 		next,
 		sp.ProcessMetrics,
@@ -119,15 +129,17 @@ func createMetricsProcessor(
 
 // createLogsProcessor creates a logs processor based on this config
 func createLogsProcessor(
-	_ context.Context,
-	params component.ProcessorCreateSettings,
-	cfg config.Processor,
+	ctx context.Context,
+	params processor.CreateSettings,
+	cfg component.Config,
 	next consumer.Logs,
-) (component.LogsProcessor, error) {
+) (processor.Logs, error) {
 	oCfg := cfg.(*Config)
 
-	sp := newSourceProcessor(oCfg)
+	sp := newSourceProcessor(params, oCfg)
 	return processorhelper.NewLogsProcessor(
+		ctx,
+		params,
 		cfg,
 		next,
 		sp.ProcessLogs,

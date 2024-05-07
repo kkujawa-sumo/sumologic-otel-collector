@@ -18,7 +18,7 @@ import (
 	"regexp"
 	"time"
 
-	conventions "go.opentelemetry.io/collector/model/semconv/v1.5.0"
+	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
 
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,7 +40,7 @@ const (
 	defaultTagCronJobName     = "k8s.cronjob.name"
 	defaultTagJobName         = "k8s.job.name"
 	defaultTagNodeName        = "k8s.node.name"
-	defaultTagPodUID          = "k8s.pod.id"
+	defaultTagPodUID          = "k8s.pod.uid"
 	defaultTagReplicaSetName  = "k8s.replicaset.name"
 	defaultTagServiceName     = "k8s.service.name"
 	defaultTagStatefulSetName = "k8s.statefulset.name"
@@ -50,28 +50,33 @@ const (
 // PodIdentifier is a custom type to represent IP Address or Pod UID
 type PodIdentifier string
 
-var (
-	// TODO: move these to config with default values
-	podNameIgnorePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`jaeger-agent`),
-		regexp.MustCompile(`jaeger-collector`),
-		regexp.MustCompile(`otel-collector`),
-		regexp.MustCompile(`otel-agent`),
-		regexp.MustCompile(`collection-sumologic-otelcol`),
-	}
-	defaultPodDeleteGracePeriod = time.Second * 120
+const (
+	DefaultPodDeleteGracePeriod = time.Second * 120
 	watchSyncPeriod             = time.Minute * 5
 )
 
 // Client defines the main interface that allows querying pods by metadata.
 type Client interface {
-	GetPod(PodIdentifier) (*Pod, bool)
+	GetPodAttributes(PodIdentifier) (map[string]string, bool)
 	Start()
 	Stop()
 }
 
 // ClientProvider defines a func type that returns a new Client.
-type ClientProvider func(*zap.Logger, k8sconfig.APIConfig, ExtractionRules, Filters, []Association, APIClientsetProvider, InformerProvider, OwnerProvider, string) (Client, error)
+type ClientProvider func(
+	*zap.Logger,
+	k8sconfig.APIConfig,
+	ExtractionRules,
+	Filters,
+	[]Association,
+	Excludes,
+	APIClientsetProvider,
+	InformerProvider,
+	OwnerProvider,
+	string,
+	time.Duration,
+	time.Duration,
+) (Client, error)
 
 // APIClientsetProvider defines a func type that initializes and return a new kubernetes
 // Clientset object.
@@ -79,23 +84,30 @@ type APIClientsetProvider func(config k8sconfig.APIConfig) (kubernetes.Interface
 
 // Pod represents a kubernetes pod.
 type Pod struct {
-	Name       string
-	Namespace  string
-	Address    string
-	PodUID     string
-	Attributes map[string]string
-	StartTime  *metav1.Time
-	Ignore     bool
+	Attributes      map[string]string
+	StartTime       *metav1.Time
+	Name            string
+	Namespace       string
+	Address         string
+	PodUID          string
+	Ignore          bool
+	OwnerReferences *[]metav1.OwnerReference
+}
 
-	DeletedAt time.Time
+func (p Pod) GetName() string {
+	return p.Name
+}
+
+func (p Pod) GetNamespace() string {
+	return p.Namespace
 }
 
 type deleteRequest struct {
+	ts time.Time
 	// id is identifier (IP address or Pod UID) of pod to remove from pods map
 	id PodIdentifier
 	// name contains name of pod to remove from pods map
 	podName string
-	ts      time.Time
 }
 
 // Filters is used to instruct the client on how to filter out k8s pods.
@@ -126,7 +138,6 @@ type FieldFilter struct {
 // ExtractionRules is used to specify the information that needs to be extracted
 // from pods and added to the spans as tags.
 type ExtractionRules struct {
-	ClusterName     bool
 	ContainerID     bool
 	ContainerImage  bool
 	ContainerName   bool
@@ -146,15 +157,15 @@ type ExtractionRules struct {
 
 	OwnerLookupEnabled bool
 
-	Tags            ExtractionFieldTags
-	Annotations     []FieldExtractionRule
-	Labels          []FieldExtractionRule
-	NamespaceLabels []FieldExtractionRule
+	Tags                 ExtractionFieldTags
+	Annotations          []FieldExtractionRule
+	NamespaceAnnotations []FieldExtractionRule
+	Labels               []FieldExtractionRule
+	NamespaceLabels      []FieldExtractionRule
 }
 
 // ExtractionFieldTags is used to describe selected exported key names for the extracted data
 type ExtractionFieldTags struct {
-	ClusterName     string
 	ContainerID     string
 	ContainerImage  string
 	ContainerName   string
@@ -176,7 +187,6 @@ type ExtractionFieldTags struct {
 // NewExtractionFieldTags builds a new instance of tags with default values
 func NewExtractionFieldTags() ExtractionFieldTags {
 	tags := ExtractionFieldTags{}
-	tags.ClusterName = conventions.AttributeK8SClusterName
 	tags.ContainerID = defaultTagContainerID
 	tags.ContainerImage = defaultTagContainerImage
 	tags.ContainerName = defaultTagContainerName
@@ -199,13 +209,13 @@ func NewExtractionFieldTags() ExtractionFieldTags {
 // FieldExtractionRule is used to specify which fields to extract from pod fields
 // and inject into spans as attributes.
 type FieldExtractionRule struct {
+	// Regex is a regular expression used to extract a sub-part of a field value.
+	// Full value is extracted when no regexp is provided.
+	Regex *regexp.Regexp
 	// Name is used to as the Span tag name.
 	Name string
 	// Key is used to lookup k8s pod fields.
 	Key string
-	// Regex is a regular expression used to extract a sub-part of a field value.
-	// Full value is extracted when no regexp is provided.
-	Regex *regexp.Regexp
 }
 
 // Associations represent a list of rules for Pod metadata associations with resources
@@ -217,4 +227,14 @@ type Associations struct {
 type Association struct {
 	From string
 	Name string
+}
+
+// Excludes represent a list of Pods to ignore
+type Excludes struct {
+	Pods []ExcludePods
+}
+
+// ExcludePods represent a Pod name to ignore
+type ExcludePods struct {
+	Name *regexp.Regexp
 }

@@ -15,15 +15,11 @@
 package k8sprocessor
 
 import (
-	"go.opentelemetry.io/collector/config"
-
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 )
 
 // Config defines configuration for k8s attributes processor.
 type Config struct {
-	config.ProcessorSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-
 	k8sconfig.APIConfig `mapstructure:",squash"`
 
 	// Passthrough mode only annotates resources with the pod IP and
@@ -47,6 +43,10 @@ type Config struct {
 	// Association section allows to define rules for tagging spans, metrics,
 	// and logs with Pod metadata.
 	Association []PodAssociationConfig `mapstructure:"pod_association"`
+
+	// Exclude section allows to define names of pod that should be
+	// ignored while tagging.
+	Exclude ExcludeConfig `mapstructure:"exclude"`
 }
 
 func (cfg *Config) Validate() error {
@@ -60,7 +60,7 @@ type ExtractConfig struct {
 	// The field accepts a list of strings.
 	//
 	// Metadata fields supported right now are,
-	//   namespace, podName, podUID, deployment, cluster, node and startTime
+	//   namespace, podName, podUID, deployment, node and startTime
 	//
 	// Specifying anything other than these values will result in an error.
 	// By default all of the fields are extracted and added to spans and metrics.
@@ -82,6 +82,12 @@ type ExtractConfig struct {
 	// It is a list of FieldExtractConfig type. See FieldExtractConfig
 	// documentation for more details.
 	Labels []FieldExtractConfig `mapstructure:"labels"`
+
+	// NamespaceAnnotations allows extracting data from namespace annotations and record it
+	// as resource attributes.
+	// It is a list of FieldExtractConfig type. See FieldExtractConfig
+	// documentation for more details.
+	NamespaceAnnotations []FieldExtractConfig `mapstructure:"namespace_annotations"`
 
 	// NamespaceLabels allows extracting data from namespace labels and record it
 	// as resource attributes.
@@ -227,3 +233,13 @@ type PodAssociationConfig struct {
 
 // DefaultDelimiter is default value for Delimiter for ExtractConfig
 const DefaultDelimiter string = ", "
+
+// ExcludeConfig represent a list of Pods to exclude
+type ExcludeConfig struct {
+	Pods []ExcludePodConfig `mapstructure:"pods"`
+}
+
+// ExcludePodConfig represent a Pod name to ignore
+type ExcludePodConfig struct {
+	Name string `mapstructure:"name"`
+}

@@ -18,39 +18,42 @@ import (
 	"context"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/processor"
 	"go.opentelemetry.io/collector/processor/processorhelper"
 )
 
 const (
 	// The value of "type" Tail Sampling in configuration.
-	typeStr = "sumologic_syslog"
+	typeStr        = "sumologic_syslog"
+	stabilityLevel = component.StabilityLevelBeta
 )
 
-var processorCapabilities = consumer.Capabilities{MutatesData: true}
+var (
+	processorCapabilities = consumer.Capabilities{MutatesData: true}
+	Type                  = component.MustNewType(typeStr)
+)
 
 // NewFactory returns a new factory for the Tail Sampling processor.
-func NewFactory() component.ProcessorFactory {
-	return processorhelper.NewFactory(
-		typeStr,
+func NewFactory() processor.Factory {
+	return processor.NewFactory(
+		Type,
 		createDefaultConfig,
-		processorhelper.WithLogs(createLogProcessor))
+		processor.WithLogs(createLogProcessor, stabilityLevel))
 }
 
-func createDefaultConfig() config.Processor {
+func createDefaultConfig() component.Config {
 	return &Config{
-		ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
-		FacilityAttr:      defaultFacilityAttr,
+		FacilityAttr: defaultFacilityAttr,
 	}
 }
 
 func createLogProcessor(
-	_ context.Context,
-	params component.ProcessorCreateSettings,
-	cfg config.Processor,
+	ctx context.Context,
+	params processor.CreateSettings,
+	cfg component.Config,
 	nextConsumer consumer.Logs,
-) (component.LogsProcessor, error) {
+) (processor.Logs, error) {
 	tCfg := cfg.(*Config)
 
 	ssp, err := newSumologicSyslogProcessor(tCfg)
@@ -59,6 +62,8 @@ func createLogProcessor(
 	}
 
 	return processorhelper.NewLogsProcessor(
+		ctx,
+		params,
 		cfg,
 		nextConsumer,
 		ssp.ProcessLogs,

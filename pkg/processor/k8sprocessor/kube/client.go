@@ -22,6 +22,7 @@ import (
 
 	"go.uber.org/zap"
 	api_v1 "k8s.io/api/core/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
+
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sprocessor/observability"
 )
 
@@ -50,6 +52,7 @@ type WatchClient struct {
 	Rules        ExtractionRules
 	Filters      Filters
 	Associations []Association
+	Exclude      Excludes
 }
 
 // New initializes a new k8s Client.
@@ -59,22 +62,26 @@ func New(
 	rules ExtractionRules,
 	filters Filters,
 	associations []Association,
+	exclude Excludes,
 	newClientSet APIClientsetProvider,
 	newInformer InformerProvider,
 	newOwnerProviderFunc OwnerProvider,
 	delimiter string,
+	deleteInterval time.Duration,
+	gracePeriod time.Duration,
 ) (Client, error) {
 	c := &WatchClient{
 		logger:       logger,
 		Rules:        rules,
 		Filters:      filters,
 		Associations: associations,
+		Exclude:      exclude,
 		stopCh:       make(chan struct{}),
 		delimiter:    delimiter,
+		Pods:         map[PodIdentifier]*Pod{},
 	}
-	go c.deleteLoop(time.Second*30, defaultPodDeleteGracePeriod)
+	go c.deleteLoop(deleteInterval, gracePeriod)
 
-	c.Pods = map[PodIdentifier]*Pod{}
 	if newClientSet == nil {
 		newClientSet = k8sconfig.MakeClient
 	}
@@ -95,7 +102,7 @@ func New(
 			newOwnerProviderFunc = newOwnerProvider
 		}
 
-		c.op, err = newOwnerProviderFunc(logger, c.kc, labelSelector, fieldSelector, c.Filters.Namespace)
+		c.op, err = newOwnerProviderFunc(logger, c.kc, labelSelector, fieldSelector, rules, c.Filters.Namespace, deleteInterval, gracePeriod)
 		if err != nil {
 			return nil, err
 		}
@@ -110,6 +117,11 @@ func New(
 		newInformer = newSharedInformer
 	}
 
+	// the Node filter only applies to Pods, so we add it here
+	if filters.Node != "" {
+		fieldSelector = addNodeSelector(fieldSelector, filters.Node)
+	}
+
 	c.informer = newInformer(c.kc, c.Filters.Namespace, labelSelector, fieldSelector)
 	return c, err
 }
@@ -120,11 +132,27 @@ func (c *WatchClient) Start() {
 		c.op.Start()
 	}
 
-	c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err := c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.handlePodAdd,
 		UpdateFunc: c.handlePodUpdate,
 		DeleteFunc: c.handlePodDelete,
 	})
+	if err != nil {
+		c.logger.Error("error adding event handler to pod informer", zap.Error(err))
+	}
+	err = c.informer.SetTransform(
+		func(object interface{}) (interface{}, error) {
+			originalPod, success := object.(*api_v1.Pod)
+			if !success {
+				return object.(cache.DeletedFinalStateUnknown), nil
+			} else {
+				return removeUnnecessaryPodData(originalPod, c.Rules), nil
+			}
+		},
+	)
+	if err != nil {
+		c.logger.Warn("error setting Pod data transformer, continuing without it", zap.Error(err))
+	}
 	c.informer.Run(c.stopCh)
 }
 
@@ -144,7 +172,9 @@ func (c *WatchClient) handlePodAdd(obj interface{}) {
 	} else {
 		c.logger.Error("object received was not of type api_v1.Pod", zap.Any("received", obj))
 	}
+	c.m.RLock()
 	podTableSize := len(c.Pods)
+	c.m.RUnlock()
 	observability.RecordPodTableSize(int64(podTableSize))
 }
 
@@ -156,28 +186,48 @@ func (c *WatchClient) handlePodUpdate(old, new interface{}) {
 	} else {
 		c.logger.Error("object received was not of type api_v1.Pod", zap.Any("received", new))
 	}
+	c.m.RLock()
 	podTableSize := len(c.Pods)
+	c.m.RUnlock()
 	observability.RecordPodTableSize(int64(podTableSize))
 }
 
 func (c *WatchClient) handlePodDelete(obj interface{}) {
 	observability.RecordPodDeleted()
-	if pod, ok := obj.(*api_v1.Pod); ok {
-		c.forgetPod(pod)
-	} else {
+
+	var pod *api_v1.Pod
+
+	switch obj := obj.(type) {
+	case *api_v1.Pod:
+		pod = obj
+	case cache.DeletedFinalStateUnknown:
+		prev, ok := obj.Obj.(*api_v1.Pod)
+		if !ok {
+			c.logger.Error(
+				"object received was DeletedFinalStateUnknown but did not contain api_v1.Pod",
+				zap.Any("received", obj),
+			)
+			return
+		}
+		pod = prev
+	default:
 		c.logger.Error("object received was not of type api_v1.Pod", zap.Any("received", obj))
+		return
 	}
-	podTableSize := len(c.Pods)
-	observability.RecordPodTableSize(int64(podTableSize))
+
+	c.forgetPod(pod)
 }
 
 func (c *WatchClient) deleteLoop(interval time.Duration, gracePeriod time.Duration) {
 	// This loop runs after N seconds and deletes pods from cache.
 	// It iterates over the delete queue and deletes all that aren't
 	// in the grace period anymore.
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
 	for {
 		select {
-		case <-time.After(interval):
+		case <-ticker.C:
 			var cutoff int
 			now := time.Now()
 			c.deleteMut.Lock()
@@ -202,8 +252,8 @@ func (c *WatchClient) deleteLoop(interval time.Duration, gracePeriod time.Durati
 				}
 			}
 			podTableSize := len(c.Pods)
-			observability.RecordPodTableSize(int64(podTableSize))
 			c.m.Unlock()
+			observability.RecordPodTableSize(int64(podTableSize))
 
 		case <-c.stopCh:
 			return
@@ -211,19 +261,42 @@ func (c *WatchClient) deleteLoop(interval time.Duration, gracePeriod time.Durati
 	}
 }
 
-// GetPod takes an IP address or Pod UID and returns the pod the identifier is associated with.
-func (c *WatchClient) GetPod(identifier PodIdentifier) (*Pod, bool) {
+// getPod takes an IP address or Pod UID and returns the pod the identifier is associated with.
+func (c *WatchClient) getPod(identifier PodIdentifier) (*Pod, bool) {
 	c.m.RLock()
+	defer c.m.RUnlock()
 	pod, ok := c.Pods[identifier]
-	c.m.RUnlock()
-	if ok {
-		if pod.Ignore {
-			return nil, false
-		}
-		return pod, ok
+	if !ok {
+		observability.RecordIPLookupMiss()
+		return nil, ok
 	}
-	observability.RecordIPLookupMiss()
-	return nil, false
+	if pod.Ignore {
+		return nil, false
+	}
+	return pod, true
+}
+
+// GetPodAttributes takes an IP address or Pod UID and returns the metadata attributes of the Pod the
+// identifier is associated with
+func (c *WatchClient) GetPodAttributes(identifier PodIdentifier) (map[string]string, bool) {
+	pod, ok := c.getPod(identifier)
+	if !ok {
+		return nil, false
+	}
+	ownerAttributes := c.getPodOwnerMetadataAttributes(pod)
+
+	// we need to take a lock here because pod.Attributes may be modified concurrently
+	// TODO: clean up the locking in this function and the ones it calls
+	c.m.RLock()
+	defer c.m.RUnlock()
+	attributes := make(map[string]string, len(pod.Attributes))
+	for key, value := range pod.Attributes {
+		attributes[key] = value
+	}
+	for key, value := range ownerAttributes {
+		attributes[key] = value
+	}
+	return attributes, ok
 }
 
 func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
@@ -249,6 +322,9 @@ func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
 	}
 
 	if c.Rules.NodeName {
+		if len(pod.Spec.NodeName) == 0 {
+			c.logger.Warn("missing Node name for Pod, cache may be out of sync", zap.String("pod", pod.Name))
+		}
 		tags[c.Rules.Tags.NodeName] = pod.Spec.NodeName
 	}
 
@@ -263,59 +339,14 @@ func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
 		}
 	}
 
-	if c.Rules.ClusterName {
-		clusterName := pod.GetClusterName()
-		if clusterName != "" {
-			tags[c.Rules.Tags.ClusterName] = clusterName
-		}
-	}
-
-	if c.Rules.OwnerLookupEnabled {
-		c.logger.Info("pod owner lookup", zap.Any("pod", pod.Name), zap.Any("owner refs", pod.OwnerReferences))
-		owners := c.op.GetOwners(pod)
-		c.logger.Info("pod owner lookup #2", zap.Any("owners", owners))
-
-		for _, owner := range owners {
-			switch owner.kind {
-			case "DaemonSet":
-				if c.Rules.DaemonSetName {
-					tags[c.Rules.Tags.DaemonSetName] = owner.name
-				}
-			case "Deployment":
-				if c.Rules.DeploymentName {
-					tags[c.Rules.Tags.DeploymentName] = owner.name
-				}
-			case "ReplicaSet":
-				if c.Rules.ReplicaSetName {
-					tags[c.Rules.Tags.ReplicaSetName] = owner.name
-				}
-			case "StatefulSet":
-				if c.Rules.StatefulSetName {
-					tags[c.Rules.Tags.StatefulSetName] = owner.name
-				}
-			case "Job":
-				if c.Rules.JobName {
-					tags[c.Rules.Tags.JobName] = owner.name
-				}
-			case "CronJob":
-				if c.Rules.CronJobName {
-					tags[c.Rules.Tags.CronJobName] = owner.name
-				}
-
-			default:
-				// Do nothing
-			}
-		}
-
-		if c.Rules.ServiceName {
-			tags[c.Rules.Tags.ServiceName] = strings.Join(c.op.GetServices(pod), c.delimiter)
-		}
-
-	}
+	// Owner metadata is updated on every query.
 
 	if len(pod.Status.ContainerStatuses) > 0 {
 		cs := pod.Status.ContainerStatuses[0]
 		if c.Rules.ContainerID {
+			if len(cs.ContainerID) == 0 {
+				c.logger.Warn("missing container ID for Pod, cache may be out of sync", zap.String("pod", pod.Name), zap.String("container_name", cs.Name))
+			}
 			tags[c.Rules.Tags.ContainerID] = cs.ContainerID
 		}
 	}
@@ -331,19 +362,19 @@ func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
 		}
 	}
 
-	if c.Rules.PodUID {
-		tags[c.Rules.Tags.PodUID] = string(pod.UID)
-	}
-
 	for _, r := range c.Rules.Labels {
 		c.extractLabelsIntoTags(r, pod.Labels, tags)
 	}
 
-	if len(c.Rules.NamespaceLabels) > 0 && c.Rules.OwnerLookupEnabled {
+	if (len(c.Rules.NamespaceLabels) > 0 || len(c.Rules.NamespaceAnnotations) > 0) && c.Rules.OwnerLookupEnabled {
 		namespace := c.op.GetNamespace(pod)
 		if namespace != nil {
 			for _, r := range c.Rules.NamespaceLabels {
 				c.extractLabelsIntoTags(r, namespace.Labels, tags)
+			}
+
+			for _, r := range c.Rules.NamespaceAnnotations {
+				c.extractLabelsIntoTags(r, namespace.Annotations, tags)
 			}
 		}
 	}
@@ -352,6 +383,122 @@ func (c *WatchClient) extractPodAttributes(pod *api_v1.Pod) map[string]string {
 		c.extractLabelsIntoTags(r, pod.Annotations, tags)
 	}
 	return tags
+}
+
+func (c *WatchClient) getPodOwnerMetadataAttributes(pod *Pod) map[string]string {
+	c.m.RLock()
+	defer c.m.RUnlock()
+	attributes := map[string]string{}
+	if c.Rules.OwnerLookupEnabled {
+		c.logger.Debug("pod owner lookup",
+			zap.String("pod.Name", pod.Name),
+			zap.Any("pod.OwnerReferences", pod.OwnerReferences),
+		)
+		owners := c.op.GetOwners(pod)
+
+		for _, owner := range owners {
+			switch owner.kind {
+			case "DaemonSet":
+				if c.Rules.DaemonSetName {
+					attributes[c.Rules.Tags.DaemonSetName] = owner.name
+				}
+			case "Deployment":
+				if c.Rules.DeploymentName {
+					attributes[c.Rules.Tags.DeploymentName] = owner.name
+				}
+			case "ReplicaSet":
+				if c.Rules.ReplicaSetName {
+					attributes[c.Rules.Tags.ReplicaSetName] = owner.name
+				}
+			case "StatefulSet":
+				if c.Rules.StatefulSetName {
+					attributes[c.Rules.Tags.StatefulSetName] = owner.name
+				}
+			case "Job":
+				if c.Rules.JobName {
+					attributes[c.Rules.Tags.JobName] = owner.name
+				}
+			case "CronJob":
+				if c.Rules.CronJobName {
+					attributes[c.Rules.Tags.CronJobName] = owner.name
+				}
+
+			default:
+				// Do nothing
+			}
+		}
+
+		if c.Rules.ServiceName {
+			services := c.op.GetServices(pod.Name)
+			attributes[c.Rules.Tags.ServiceName] = strings.Join(services, c.delimiter)
+		}
+	}
+	return attributes
+}
+
+// This function removes all data from the Pod except what is required by extraction rules
+func removeUnnecessaryPodData(pod *api_v1.Pod, rules ExtractionRules) *api_v1.Pod {
+
+	// name, namespace, uid, start time and ip are needed for identifying Pods
+	transformedPod := api_v1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      pod.GetName(),
+			Namespace: pod.GetNamespace(),
+			UID:       pod.GetUID(),
+		},
+		Status: api_v1.PodStatus{
+			PodIP:     pod.Status.PodIP,
+			StartTime: pod.Status.StartTime,
+		},
+	}
+
+	if rules.StartTime {
+		transformedPod.SetCreationTimestamp(pod.GetCreationTimestamp())
+	}
+
+	if rules.PodUID {
+		transformedPod.SetUID(pod.GetUID())
+	}
+
+	if rules.NodeName {
+		transformedPod.Spec.NodeName = pod.Spec.NodeName
+	}
+
+	if rules.HostName {
+		transformedPod.Spec.Hostname = pod.Spec.Hostname
+	}
+
+	if rules.ContainerID {
+		for _, containerStatus := range pod.Status.ContainerStatuses {
+			transformedPod.Status.ContainerStatuses = append(
+				transformedPod.Status.ContainerStatuses,
+				api_v1.ContainerStatus{ContainerID: containerStatus.ContainerID},
+			)
+		}
+	}
+
+	if rules.ContainerName || rules.ContainerImage {
+		for _, container := range pod.Spec.Containers {
+			transformedPod.Spec.Containers = append(
+				transformedPod.Spec.Containers,
+				api_v1.Container{Name: container.Name, Image: container.Image},
+			)
+		}
+	}
+
+	if len(rules.Labels) > 0 {
+		transformedPod.Labels = pod.Labels
+	}
+
+	if len(rules.Annotations) > 0 {
+		transformedPod.Annotations = pod.Annotations
+	}
+
+	if rules.OwnerLookupEnabled {
+		transformedPod.SetOwnerReferences(pod.GetOwnerReferences())
+	}
+
+	return &transformedPod
 }
 
 func (c *WatchClient) extractLabelsIntoTags(r FieldExtractionRule, labels map[string]string, tags map[string]string) {
@@ -383,11 +530,12 @@ func (c *WatchClient) extractField(v string, r FieldExtractionRule) string {
 
 func (c *WatchClient) addOrUpdatePod(pod *api_v1.Pod) {
 	newPod := &Pod{
-		Name:      pod.Name,
-		Namespace: pod.Namespace,
-		Address:   pod.Status.PodIP,
-		PodUID:    string(pod.UID),
-		StartTime: pod.Status.StartTime,
+		Name:            pod.Name,
+		Namespace:       pod.Namespace,
+		Address:         pod.Status.PodIP,
+		PodUID:          string(pod.UID),
+		StartTime:       pod.Status.StartTime,
+		OwnerReferences: &pod.OwnerReferences,
 	}
 
 	if c.shouldIgnorePod(pod) {
@@ -399,42 +547,55 @@ func (c *WatchClient) addOrUpdatePod(pod *api_v1.Pod) {
 	c.m.Lock()
 	defer c.m.Unlock()
 
-	if pod.UID != "" {
-		c.Pods[PodIdentifier(pod.UID)] = newPod
+	identifiers := []PodIdentifier{
+		PodIdentifier(pod.UID),
+		PodIdentifier(pod.Status.PodIP),
 	}
-	if pod.Status.PodIP != "" {
-		// compare initial scheduled timestamp for existing pod and new pod with same IP
-		// and only replace old pod if scheduled time of new pod is newer? This should fix
-		// the case where scheduler has assigned the same IP to a new pod but update event for
-		// the old pod came in later.
-		if p, ok := c.Pods[PodIdentifier(pod.Status.PodIP)]; ok {
-			if p.StartTime != nil && pod.Status.StartTime.Before(p.StartTime) {
-				return
-			}
-		}
-		c.Pods[PodIdentifier(pod.Status.PodIP)] = newPod
-	}
-	// Use pod_name.namespace_name identifier
+
 	if newPod.Name != "" && newPod.Namespace != "" {
-		c.Pods[PodIdentifier(fmt.Sprintf("%s.%s", newPod.Name, newPod.Namespace))] = newPod
+		identifiers = append(identifiers, generatePodIDFromName(newPod))
+	}
+
+	for _, identifier := range identifiers {
+		if identifier != "" {
+			// compare initial scheduled timestamp for existing pod and new pod with same identifier
+			// and only replace old pod if scheduled time of new pod is newer or equal.
+			// This should fix the case where scheduler has assigned the same attributes (like IP address)
+			// to a new pod but update event for the old pod came in later.
+			if p, ok := c.Pods[identifier]; ok {
+				if p.StartTime != nil && pod.Status.StartTime.Before(p.StartTime) {
+					continue
+				}
+			}
+			c.Pods[identifier] = newPod
+		}
 	}
 }
 
-func (c *WatchClient) forgetPod(pod *api_v1.Pod) {
-	c.m.RLock()
-	p, ok := c.GetPod(PodIdentifier(pod.Status.PodIP))
-	c.m.RUnlock()
+type Namer interface {
+	GetName() string
+	GetNamespace() string
+}
 
+func generatePodIDFromName(p Namer) PodIdentifier {
+	return PodIdentifier(fmt.Sprintf("%s.%s", p.GetName(), p.GetNamespace()))
+}
+
+func (c *WatchClient) forgetPod(pod *api_v1.Pod) {
+	p, ok := c.getPod(PodIdentifier(pod.Status.PodIP))
 	if ok && p.Name == pod.Name {
 		c.appendDeleteQueue(PodIdentifier(pod.Status.PodIP), pod.Name)
 	}
 
-	c.m.RLock()
-	p, ok = c.GetPod(PodIdentifier(pod.UID))
-	c.m.RUnlock()
-
+	p, ok = c.getPod(PodIdentifier(pod.UID))
 	if ok && p.Name == pod.Name {
 		c.appendDeleteQueue(PodIdentifier(pod.UID), pod.Name)
+	}
+
+	id := generatePodIDFromName(pod)
+	p, ok = c.getPod(id)
+	if ok && p.Name == pod.Name {
+		c.appendDeleteQueue(id, pod.Name)
 	}
 }
 
@@ -465,9 +626,9 @@ func (c *WatchClient) shouldIgnorePod(pod *api_v1.Pod) bool {
 		}
 	}
 
-	// Check well known names that should be ignored
-	for _, rexp := range podNameIgnorePatterns {
-		if rexp.MatchString(pod.Name) {
+	// Check if user requested the pod to be ignored through configuration
+	for _, excludedPod := range c.Exclude.Pods {
+		if excludedPod.Name.MatchString(pod.Name) {
 			return true
 		}
 	}
@@ -475,6 +636,8 @@ func (c *WatchClient) shouldIgnorePod(pod *api_v1.Pod) bool {
 	return false
 }
 
+// selectors from Filters creates K8s selectors from Filters
+// this notably does not include the Node filter, which only applies to Pods and is handled separately in addNodeSelector
 func selectorsFromFilters(filters Filters) (labels.Selector, fields.Selector, error) {
 	labelSelector := labels.Everything()
 	for _, f := range filters.Labels {
@@ -497,8 +660,13 @@ func selectorsFromFilters(filters Filters) (labels.Selector, fields.Selector, er
 		}
 	}
 
-	if filters.Node != "" {
-		selectors = append(selectors, fields.OneTermEqualSelector(podNodeField, filters.Node))
-	}
 	return labelSelector, fields.AndSelectors(selectors...), nil
+}
+
+func addNodeSelector(selector fields.Selector, node string) fields.Selector {
+	nodeSelector := fields.OneTermEqualSelector(podNodeField, node)
+	if selector.Empty() {
+		return nodeSelector
+	}
+	return fields.AndSelectors(selector, nodeSelector)
 }

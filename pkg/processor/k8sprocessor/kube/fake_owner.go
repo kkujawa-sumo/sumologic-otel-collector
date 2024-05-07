@@ -15,6 +15,8 @@
 package kube
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 	api_v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,8 +28,12 @@ import (
 
 // fakeOwnerCache is a simple structure which aids querying for owners
 type fakeOwnerCache struct {
-	logger       *zap.Logger
-	objectOwners map[string]*ObjectOwner
+	logger          *zap.Logger
+	objectOwners    map[string]*ObjectOwner
+	labelSelector   labels.Selector
+	fieldSelector   fields.Selector
+	extractionRules ExtractionRules
+	namespace       string
 }
 
 // NewOwnerProvider creates new instance of the owners api
@@ -35,8 +41,16 @@ func newFakeOwnerProvider(logger *zap.Logger,
 	client kubernetes.Interface,
 	labelSelector labels.Selector,
 	fieldSelector fields.Selector,
-	namespace string) (OwnerAPI, error) {
-	ownerCache := fakeOwnerCache{}
+	extractionRules ExtractionRules,
+	namespace string,
+	_ time.Duration, _ time.Duration,
+) (OwnerAPI, error) {
+	ownerCache := fakeOwnerCache{
+		labelSelector:   labelSelector,
+		fieldSelector:   fieldSelector,
+		extractionRules: extractionRules,
+		namespace:       namespace,
+	}
 	ownerCache.objectOwners = map[string]*ObjectOwner{}
 	ownerCache.logger = logger
 
@@ -95,7 +109,7 @@ func (op *fakeOwnerCache) Start() {}
 func (op *fakeOwnerCache) Stop() {}
 
 // GetServices fetches list of services for a given pod
-func (op *fakeOwnerCache) GetServices(pod *api_v1.Pod) []string {
+func (op *fakeOwnerCache) GetServices(podName string) []string {
 	return []string{"foo", "bar"}
 }
 
@@ -103,21 +117,22 @@ func (op *fakeOwnerCache) GetServices(pod *api_v1.Pod) []string {
 func (op *fakeOwnerCache) GetNamespace(pod *api_v1.Pod) *api_v1.Namespace {
 	namespace := api_v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   pod.Namespace,
-			Labels: map[string]string{"label": "namespace_label_value"},
+			Name:        pod.Namespace,
+			Labels:      map[string]string{"label": "namespace_label_value"},
+			Annotations: map[string]string{"annotation": "namespace_annotation_value"},
 		},
 	}
 	return &namespace
 }
 
 // GetOwners fetches deep tree of owners for a given pod
-func (op *fakeOwnerCache) GetOwners(pod *api_v1.Pod) []*ObjectOwner {
+func (op *fakeOwnerCache) GetOwners(pod *Pod) []*ObjectOwner {
 	objectOwners := []*ObjectOwner{}
 
 	visited := map[types.UID]bool{}
 	queue := []types.UID{}
 
-	for _, or := range pod.OwnerReferences {
+	for _, or := range *pod.OwnerReferences {
 		if _, uidVisited := visited[or.UID]; !uidVisited {
 			queue = append(queue, or.UID)
 			visited[or.UID] = true

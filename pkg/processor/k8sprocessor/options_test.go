@@ -21,6 +21,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"k8s.io/apimachinery/pkg/selection"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
@@ -195,6 +200,68 @@ func TestWithExtractLabels(t *testing.T) {
 	}
 }
 
+func TestWithExtractNamespaceAnnotations(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []FieldExtractConfig
+		want      []kube.FieldExtractionRule
+		wantError string
+	}{
+		{
+			"empty",
+			[]FieldExtractConfig{},
+			[]kube.FieldExtractionRule{},
+			"",
+		},
+		{
+			"bad",
+			[]FieldExtractConfig{{
+				TagName: "t1",
+				Key:     "k1",
+				Regex:   "[",
+			}},
+			[]kube.FieldExtractionRule{},
+			"error parsing regexp: missing closing ]: `[`",
+		},
+		{
+			"basic",
+			[]FieldExtractConfig{
+				{
+					TagName: "tag1",
+					Key:     "key1",
+					Regex:   "field=(?P<value>.+)",
+				},
+			},
+			[]kube.FieldExtractionRule{
+				{
+					Name:  "tag1",
+					Key:   "key1",
+					Regex: regexp.MustCompile(`field=(?P<value>.+)`),
+				},
+			},
+			"",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &kubernetesprocessor{}
+			option := WithExtractNamespaceAnnotations(tt.args...)
+			err := option(p)
+			if tt.wantError != "" {
+				assert.Error(t, err)
+				assert.Equal(t, err.Error(), tt.wantError)
+				return
+			}
+
+			assert.NoError(t, err)
+			got := p.rules.NamespaceAnnotations
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("WithExtractNamespaceAnnotations() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWithExtractNamespaceLabels(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -265,7 +332,6 @@ func TestWithExtractMetadata(t *testing.T) {
 	assert.True(t, p.rules.PodUID)
 	assert.True(t, p.rules.StartTime)
 	assert.True(t, p.rules.DeploymentName)
-	assert.True(t, p.rules.ClusterName)
 	assert.True(t, p.rules.NodeName)
 
 	p = &kubernetesprocessor{}
@@ -273,14 +339,66 @@ func TestWithExtractMetadata(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, err.Error(), `"randomfield" is not a supported metadata field`)
 
-	assert.NoError(t, WithExtractMetadata("namespace", "clusterName")(p))
+	assert.NoError(t, WithExtractMetadata("namespace")(p))
 	assert.True(t, p.rules.Namespace)
-	assert.True(t, p.rules.ClusterName)
 	assert.False(t, p.rules.PodName)
 	assert.False(t, p.rules.PodUID)
 	assert.False(t, p.rules.StartTime)
 	assert.False(t, p.rules.DeploymentName)
 	assert.False(t, p.rules.NodeName)
+}
+
+func TestWithExtractMetadataSemanticConventions(t *testing.T) {
+	p := &kubernetesprocessor{}
+	fields := []string{
+		conventions.AttributeContainerID,
+		conventions.AttributeContainerImageName,
+		conventions.AttributeContainerName,
+		conventions.AttributeK8SCronJobName,
+		conventions.AttributeK8SDaemonSetName,
+		conventions.AttributeK8SDeploymentName,
+		conventions.AttributeHostName,
+		conventions.AttributeK8SJobName,
+		conventions.AttributeK8SNamespaceName,
+		conventions.AttributeK8SNodeName,
+		conventions.AttributeK8SPodUID,
+		conventions.AttributeK8SPodName,
+		conventions.AttributeK8SReplicaSetName,
+		metadataOtelSemconvServiceName,
+		conventions.AttributeK8SStatefulSetName,
+		metadataOtelPodStartTime,
+	}
+	assert.NoError(t, WithExtractMetadata(fields...)(p))
+	assert.True(t, p.rules.ContainerID)
+	assert.True(t, p.rules.ContainerImage)
+	assert.True(t, p.rules.ContainerName)
+	assert.True(t, p.rules.CronJobName)
+	assert.True(t, p.rules.DaemonSetName)
+	assert.True(t, p.rules.DeploymentName)
+	assert.True(t, p.rules.HostName)
+	assert.True(t, p.rules.JobName)
+	assert.True(t, p.rules.Namespace)
+	assert.True(t, p.rules.NodeName)
+	assert.True(t, p.rules.PodName)
+	assert.True(t, p.rules.PodUID)
+	assert.True(t, p.rules.ReplicaSetName)
+	assert.True(t, p.rules.ServiceName)
+	assert.True(t, p.rules.StatefulSetName)
+	assert.True(t, p.rules.StartTime)
+}
+
+func TestWithExtractMetadataDeprecatedOption(t *testing.T) {
+	core, observedLogs := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+	p := &kubernetesprocessor{logger: logger}
+	assert.NoError(t, WithExtractMetadata("clusterName")(p))
+	assert.Equal(t, 1, observedLogs.Len())
+	assert.Equal(t, 1, observedLogs.FilterMessage("clusterName metadata field has been deprecated and will be removed soon").Len())
+	observedLogs.TakeAll()
+
+	assert.NoError(t, WithExtractTags(map[string]string{"clustername": "cluster"})(p))
+	assert.Equal(t, 1, observedLogs.Len())
+	assert.Equal(t, 1, observedLogs.FilterMessage("clusterName metadata field has been deprecated and will be removed soon").Len())
 }
 
 func TestWithFilterLabels(t *testing.T) {
@@ -662,4 +780,61 @@ func TestWithExtractPodAssociation(t *testing.T) {
 			assert.Equal(t, tt.want, p.podAssociations)
 		})
 	}
+}
+
+func TestWithExcludes(t *testing.T) {
+	tests := []struct {
+		name string
+		args ExcludeConfig
+		want kube.Excludes
+	}{
+		{
+			"default",
+			ExcludeConfig{},
+			kube.Excludes{},
+		},
+		{
+			"configured",
+			ExcludeConfig{
+				Pods: []ExcludePodConfig{
+					{Name: "ignore_pod1"},
+					{Name: "ignore_pod2"},
+				},
+			},
+			kube.Excludes{
+				Pods: []kube.ExcludePods{
+					{Name: regexp.MustCompile(`ignore_pod1`)},
+					{Name: regexp.MustCompile(`ignore_pod2`)},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &kubernetesprocessor{}
+			option := WithExcludes(tt.args)
+			require.NoError(t, option(p))
+			assert.Equal(t, tt.want, p.podIgnore)
+		})
+	}
+}
+
+func TestExtractTags(t *testing.T) {
+	p := &kubernetesprocessor{}
+	tags := map[string]string{
+		"containerid": "cntrid",
+		"podId":       "the id",
+		"hOsTnAmE":    "host",
+		"SERVICENAME": "blep",
+	}
+	assert.NoError(t, WithExtractTags(tags)(p))
+	assert.Equal(t, "cntrid", p.rules.Tags.ContainerID)
+	assert.Equal(t, "the id", p.rules.Tags.PodUID)
+	assert.Equal(t, "host", p.rules.Tags.HostName)
+	assert.Equal(t, "blep", p.rules.Tags.ServiceName)
+
+	p = &kubernetesprocessor{}
+	err := WithExtractTags(map[string]string{"randomfield": "randomvalue"})(p)
+	assert.Error(t, err)
+	assert.Equal(t, err.Error(), `"randomfield" is not a supported metadata field`)
 }

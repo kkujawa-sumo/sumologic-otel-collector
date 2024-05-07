@@ -19,65 +19,54 @@ import (
 	"fmt"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 )
 
 const (
 	// The value of "type" key in configuration.
-	typeStr = "sumologic"
+	typeStr        = "sumologic"
+	stabilityLevel = component.StabilityLevelBeta
 )
 
+var Type = component.MustNewType(typeStr)
+
 // NewFactory returns a new factory for the sumologic exporter.
-func NewFactory() component.ExporterFactory {
-	return exporterhelper.NewFactory(
-		typeStr,
+func NewFactory() exporter.Factory {
+	return exporter.NewFactory(
+		Type,
 		createDefaultConfig,
-		exporterhelper.WithLogs(createLogsExporter),
-		exporterhelper.WithMetrics(createMetricsExporter),
-		exporterhelper.WithTraces(createTracesExporter),
+		exporter.WithLogs(createLogsExporter, stabilityLevel),
+		exporter.WithMetrics(createMetricsExporter, stabilityLevel),
+		exporter.WithTraces(createTracesExporter, stabilityLevel),
 	)
 }
 
-func createDefaultConfig() config.Exporter {
-	qs := exporterhelper.DefaultQueueSettings()
+func createDefaultConfig() component.Config {
+	qs := exporterhelper.NewDefaultQueueSettings()
 	qs.Enabled = false
 
 	return &Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
+		MaxRequestBodySize: DefaultMaxRequestBodySize,
+		LogFormat:          DefaultLogFormat,
+		MetricFormat:       DefaultMetricFormat,
+		Client:             DefaultClient,
+		TraceFormat:        OTLPTraceFormat,
 
-		TranslateAttributes:      DefaultTranslateAttributes,
-		TranslateTelegrafMetrics: DefaultTranslateTelegrafMetrics,
-		CompressEncoding:         DefaultCompressEncoding,
-		MaxRequestBodySize:       DefaultMaxRequestBodySize,
-		LogFormat:                DefaultLogFormat,
-		MetricFormat:             DefaultMetricFormat,
-		SourceCategory:           DefaultSourceCategory,
-		SourceName:               DefaultSourceName,
-		SourceHost:               DefaultSourceHost,
-		Client:                   DefaultClient,
-		ClearLogsTimestamp:       DefaultClearLogsTimestamp,
-		JSONLogs: JSONLogs{
-			LogKey:       DefaultLogKey,
-			AddTimestamp: DefaultAddTimestamp,
-			TimestampKey: DefaultTimestampKey,
-			FlattenBody:  DefaultFlattenBody,
-		},
-		GraphiteTemplate: DefaultGraphiteTemplate,
-		TraceFormat:      OTLPTraceFormat,
-
-		HTTPClientSettings: CreateDefaultHTTPClientSettings(),
-		RetrySettings:      exporterhelper.DefaultRetrySettings(),
-		QueueSettings:      qs,
+		ClientConfig:         CreateDefaultClientConfig(),
+		BackOffConfig:        configretry.NewDefaultBackOffConfig(),
+		QueueSettings:        qs,
+		StickySessionEnabled: DefaultStickySessionEnabled,
 	}
 }
 
 func createLogsExporter(
-	_ context.Context,
-	params component.ExporterCreateSettings,
-	cfg config.Exporter,
-) (component.LogsExporter, error) {
-	exp, err := newLogsExporter(cfg.(*Config), params)
+	ctx context.Context,
+	params exporter.CreateSettings,
+	cfg component.Config,
+) (exporter.Logs, error) {
+	exp, err := newLogsExporter(ctx, params, cfg.(*Config))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the logs exporter: %w", err)
 	}
@@ -86,11 +75,11 @@ func createLogsExporter(
 }
 
 func createMetricsExporter(
-	_ context.Context,
-	params component.ExporterCreateSettings,
-	cfg config.Exporter,
-) (component.MetricsExporter, error) {
-	exp, err := newMetricsExporter(cfg.(*Config), params)
+	ctx context.Context,
+	params exporter.CreateSettings,
+	cfg component.Config,
+) (exporter.Metrics, error) {
+	exp, err := newMetricsExporter(ctx, params, cfg.(*Config))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the metrics exporter: %w", err)
 	}
@@ -99,11 +88,11 @@ func createMetricsExporter(
 }
 
 func createTracesExporter(
-	_ context.Context,
-	params component.ExporterCreateSettings,
-	cfg config.Exporter,
-) (component.TracesExporter, error) {
-	exp, err := newTracesExporter(cfg.(*Config), params)
+	ctx context.Context,
+	params exporter.CreateSettings,
+	cfg component.Config,
+) (exporter.Traces, error) {
+	exp, err := newTracesExporter(ctx, params, cfg.(*Config))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the traces exporter: %w", err)
 	}

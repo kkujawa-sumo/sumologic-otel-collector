@@ -20,12 +20,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"strings"
+	"sync"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/model/pdata"
-	"go.uber.org/multierr"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 
 	"github.com/SumoLogic/sumologic-otel-collector/pkg/extension/sumologicextension"
@@ -38,94 +44,45 @@ const (
 )
 
 type sumologicexporter struct {
-	sources             sourceFormats
-	config              *Config
-	logger              *zap.Logger
-	client              *http.Client
-	filter              filter
+	config *Config
+	host   component.Host
+	logger *zap.Logger
+
+	clientLock sync.RWMutex
+	client     *http.Client
+
 	prometheusFormatter prometheusFormatter
-	graphiteFormatter   graphiteFormatter
-	dataUrlMetrics      string
-	dataUrlLogs         string
-	dataUrlTraces       string
+
+	// Lock around data URLs is needed because the reconfiguration of the exporter
+	// can happen asynchronously whenever the exporter is re registering.
+	dataUrlsLock   sync.RWMutex
+	dataUrlMetrics string
+	dataUrlLogs    string
+	dataUrlTraces  string
+
+	foundSumologicExtension bool
+	sumologicExtension      *sumologicextension.SumologicExtension
+
+	stickySessionCookieLock sync.RWMutex
+	stickySessionCookie     string
+
+	id component.ID
 }
 
-func initExporter(cfg *Config, createSettings component.ExporterCreateSettings) (*sumologicexporter, error) {
-	switch cfg.LogFormat {
-	case JSONFormat:
-	case TextFormat:
-	case OTLPLogFormat:
-	default:
-		return nil, fmt.Errorf("unexpected log format: %s", cfg.LogFormat)
-	}
-
-	switch cfg.MetricFormat {
-	case GraphiteFormat:
-	case Carbon2Format:
-	case PrometheusFormat:
-	case OTLPMetricFormat:
-	default:
-		return nil, fmt.Errorf("unexpected metric format: %s", cfg.MetricFormat)
-	}
-
-	switch cfg.TraceFormat {
-	case OTLPTraceFormat:
-	default:
-		return nil, fmt.Errorf("unexpected trace format: %s", cfg.TraceFormat)
-	}
-
-	switch cfg.CompressEncoding {
-	case GZIPCompression:
-	case DeflateCompression:
-	case NoCompression:
-	default:
-		return nil, fmt.Errorf("unexpected compression encoding: %s", cfg.CompressEncoding)
-	}
-
-	if len(cfg.HTTPClientSettings.Endpoint) == 0 && cfg.HTTPClientSettings.Auth == nil {
-		return nil, errors.New("no endpoint and no auth extension specified")
-	}
-
-	if _, err := url.Parse(cfg.HTTPClientSettings.Endpoint); err != nil {
-		return nil, fmt.Errorf("failed parsing endpoint URL: %s; err: %w",
-			cfg.HTTPClientSettings.Endpoint, err,
-		)
-	}
-
-	if cfg.TranslateAttributes {
-		cfg.SourceCategory = translateConfigValue(cfg.SourceCategory)
-		cfg.SourceHost = translateConfigValue(cfg.SourceHost)
-		cfg.SourceName = translateConfigValue(cfg.SourceName)
-	}
-	sfs, err := newSourceFormats(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	cfg.MetadataAttributes = addSourceMetadataFields(cfg.MetadataAttributes)
-	f, err := newFilter(cfg.MetadataAttributes)
-	if err != nil {
-		return nil, err
-	}
+func initExporter(cfg *Config, createSettings exporter.CreateSettings) (*sumologicexporter, error) {
 
 	pf, err := newPrometheusFormatter()
 	if err != nil {
 		return nil, err
 	}
 
-	gf, err := newGraphiteFormatter(cfg.GraphiteTemplate)
-	if err != nil {
-		return nil, err
-	}
-
 	se := &sumologicexporter{
-		config:  cfg,
-		logger:  createSettings.Logger,
-		sources: sfs,
+		config: cfg,
+		logger: createSettings.Logger,
 		// NOTE: client is now set in start()
-		filter:              f,
-		prometheusFormatter: pf,
-		graphiteFormatter:   gf,
+		prometheusFormatter:     pf,
+		id:                      createSettings.ID,
+		foundSumologicExtension: false,
 	}
 
 	se.logger.Info(
@@ -138,57 +95,25 @@ func initExporter(cfg *Config, createSettings component.ExporterCreateSettings) 
 	return se, nil
 }
 
-// addSourceMetadataFields adds source related attribute names to the list of
-// metadata attributes.
-func addSourceMetadataFields(metadataAttributes []string) []string {
-	var (
-		sourceCategory bool
-		sourceHost     bool
-		sourceName     bool
-	)
-
-	for _, attr := range metadataAttributes {
-		switch attr {
-		case attributeKeySourceCategory:
-			sourceCategory = true
-		case attributeKeySourceHost:
-			sourceHost = true
-		case attributeKeySourceName:
-			sourceName = true
-		default:
-		}
-	}
-
-	if !sourceCategory {
-		metadataAttributes = append(metadataAttributes, attributeKeySourceCategory)
-	}
-	if !sourceHost {
-		metadataAttributes = append(metadataAttributes, attributeKeySourceHost)
-	}
-	if !sourceName {
-		metadataAttributes = append(metadataAttributes, attributeKeySourceName)
-	}
-
-	return metadataAttributes
-}
-
 func newLogsExporter(
+	ctx context.Context,
+	params exporter.CreateSettings,
 	cfg *Config,
-	params component.ExporterCreateSettings,
-) (component.LogsExporter, error) {
+) (exporter.Logs, error) {
 	se, err := initExporter(cfg, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize the logs exporter: %w", err)
 	}
 
 	return exporterhelper.NewLogsExporter(
-		cfg,
+		ctx,
 		params,
+		cfg,
 		se.pushLogsData,
 		// Disable exporterhelper Timeout, since we are using a custom mechanism
 		// within exporter itself
 		exporterhelper.WithTimeout(exporterhelper.TimeoutSettings{Timeout: 0}),
-		exporterhelper.WithRetry(cfg.RetrySettings),
+		exporterhelper.WithRetry(cfg.BackOffConfig),
 		exporterhelper.WithQueue(cfg.QueueSettings),
 		exporterhelper.WithStart(se.start),
 		exporterhelper.WithShutdown(se.shutdown),
@@ -196,22 +121,24 @@ func newLogsExporter(
 }
 
 func newMetricsExporter(
+	ctx context.Context,
+	params exporter.CreateSettings,
 	cfg *Config,
-	params component.ExporterCreateSettings,
-) (component.MetricsExporter, error) {
+) (exporter.Metrics, error) {
 	se, err := initExporter(cfg, params)
 	if err != nil {
 		return nil, err
 	}
 
 	return exporterhelper.NewMetricsExporter(
-		cfg,
+		ctx,
 		params,
+		cfg,
 		se.pushMetricsData,
 		// Disable exporterhelper Timeout, since we are using a custom mechanism
 		// within exporter itself
 		exporterhelper.WithTimeout(exporterhelper.TimeoutSettings{Timeout: 0}),
-		exporterhelper.WithRetry(cfg.RetrySettings),
+		exporterhelper.WithRetry(cfg.BackOffConfig),
 		exporterhelper.WithQueue(cfg.QueueSettings),
 		exporterhelper.WithStart(se.start),
 		exporterhelper.WithShutdown(se.shutdown),
@@ -219,22 +146,24 @@ func newMetricsExporter(
 }
 
 func newTracesExporter(
+	ctx context.Context,
+	params exporter.CreateSettings,
 	cfg *Config,
-	params component.ExporterCreateSettings,
-) (component.TracesExporter, error) {
+) (exporter.Traces, error) {
 	se, err := initExporter(cfg, params)
 	if err != nil {
 		return nil, err
 	}
 
 	return exporterhelper.NewTracesExporter(
-		cfg,
+		ctx,
 		params,
+		cfg,
 		se.pushTracesData,
 		// Disable exporterhelper Timeout, since we are using a custom mechanism
 		// within exporter itself
 		exporterhelper.WithTimeout(exporterhelper.TimeoutSettings{Timeout: 0}),
-		exporterhelper.WithRetry(cfg.RetrySettings),
+		exporterhelper.WithRetry(cfg.BackOffConfig),
 		exporterhelper.WithQueue(cfg.QueueSettings),
 		exporterhelper.WithStart(se.start),
 		exporterhelper.WithShutdown(se.shutdown),
@@ -244,30 +173,37 @@ func newTracesExporter(
 // pushLogsData groups data with common metadata and sends them as separate batched requests.
 // It returns the number of unsent logs and an error which contains a list of dropped records
 // so they can be handled by OTC retry mechanism
-func (se *sumologicexporter) pushLogsData(ctx context.Context, ld pdata.Logs) error {
-	var (
-		currentMetadata  fields = newFields(pdata.NewAttributeMap())
-		previousMetadata fields = newFields(pdata.NewAttributeMap())
-		errs             []error
-		droppedRecords   []logPair
-		err              error
+func (se *sumologicexporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
+	logsUrl, metricsUrl, tracesUrl := se.getDataURLs()
+	sdr := newSender(
+		se.logger,
+		se.config,
+		se.getHTTPClient(),
+		se.prometheusFormatter,
+		metricsUrl,
+		logsUrl,
+		tracesUrl,
+		se.StickySessionCookie,
+		se.SetStickySessionCookie,
+		se.id,
 	)
 
-	c, err := newCompressor(se.config.CompressEncoding)
-	if err != nil {
-		return consumererror.NewLogs(fmt.Errorf("failed to initialize compressor: %w", err), ld)
+	// Follow different execution path for OTLP format
+	if sdr.config.LogFormat == OTLPLogFormat {
+		if err := sdr.sendOTLPLogs(ctx, ld); err != nil {
+			se.handleUnauthorizedErrors(ctx, err)
+			return consumererror.NewLogs(err, ld)
+		}
+		return nil
 	}
-	sdr := newSender(
-		se.config,
-		se.client,
-		se.filter,
-		se.sources,
-		c,
-		se.prometheusFormatter,
-		se.graphiteFormatter,
-		se.dataUrlMetrics,
-		se.dataUrlLogs,
-		se.dataUrlTraces,
+
+	type droppedResourceRecords struct {
+		resource pcommon.Resource
+		records  []plog.LogRecord
+	}
+	var (
+		errs    []error
+		dropped []droppedResourceRecords
 	)
 
 	// Iterate over ResourceLogs
@@ -275,86 +211,37 @@ func (se *sumologicexporter) pushLogsData(ctx context.Context, ld pdata.Logs) er
 	for i := 0; i < rls.Len(); i++ {
 		rl := rls.At(i)
 
-		ills := rl.InstrumentationLibraryLogs()
-		// iterate over InstrumentationLibraryLogs
-		for j := 0; j < ills.Len(); j++ {
-			ill := ills.At(j)
+		currentMetadata := newFields(rl.Resource().Attributes())
 
-			// iterate over Logs
-			logs := ill.Logs()
-			for k := 0; k < logs.Len(); k++ {
-				log := logs.At(k)
-				logAttrs := log.Attributes()
+		if droppedRecords, err := sdr.sendNonOTLPLogs(ctx, rl, currentMetadata); err != nil {
+			dropped = append(dropped, droppedResourceRecords{
+				resource: rl.Resource(),
+				records:  droppedRecords,
+			})
+			errs = append(errs, err)
+		}
+	}
 
-				// copy resource attributes into logs attributes
-				// log attributes have precedence over resource attributes
-				attributes := pdata.NewAttributeMap()
-				attributes.EnsureCapacity(
-					logAttrs.Len() + rl.Resource().Attributes().Len(),
+	if len(dropped) > 0 {
+		ld = plog.NewLogs()
+
+		// Copy all dropped records to Logs
+		// NOTE: we only copy resource and log records here.
+		// Scope is not handled properly but it never was.
+		for i := range dropped {
+			rls := ld.ResourceLogs().AppendEmpty()
+			dropped[i].resource.CopyTo(rls.Resource())
+
+			for j := 0; j < len(dropped[i].records); j++ {
+				dropped[i].records[j].CopyTo(
+					rls.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty(),
 				)
-				logAttrs.CopyTo(attributes)
-				rl.Resource().Attributes().Range(func(k string, v pdata.AttributeValue) bool {
-					attributes.Insert(k, v)
-					return true
-				})
-
-				// Put merged attributes into logPair
-				lp := logPair{
-					log:        log,
-					attributes: attributes,
-				}
-
-				currentMetadata = sdr.filter.filterIn(attributes)
-
-				if se.config.TranslateAttributes {
-					currentMetadata.translateAttributes()
-				}
-
-				// If metadata differs from currently buffered, flush the buffer
-				if currentMetadata.string() != previousMetadata.string() && previousMetadata.string() != "" {
-					var dropped []logPair
-					dropped, err = sdr.sendLogs(ctx, previousMetadata)
-					if err != nil {
-						errs = append(errs, err)
-						droppedRecords = append(droppedRecords, dropped...)
-					}
-					sdr.cleanLogsBuffer()
-				}
-
-				// assign metadata
-				previousMetadata = currentMetadata
-
-				// add log to the buffer
-				var dropped []logPair
-				dropped, err = sdr.batchLog(ctx, lp, previousMetadata)
-				if err != nil {
-					droppedRecords = append(droppedRecords, dropped...)
-					errs = append(errs, err)
-				}
 			}
 		}
-	}
 
-	// Flush pending logs
-	dropped, err := sdr.sendLogs(ctx, previousMetadata)
-	if err != nil {
-		droppedRecords = append(droppedRecords, dropped...)
-		errs = append(errs, err)
-	}
-
-	if len(droppedRecords) > 0 {
-		// Move all dropped records to Logs
-		droppedLogs := pdata.NewLogs()
-		rls = droppedLogs.ResourceLogs()
-		ills := rls.AppendEmpty().InstrumentationLibraryLogs()
-		logs := ills.AppendEmpty().Logs()
-		logs.EnsureCapacity(len(droppedRecords))
-
-		for _, lp := range droppedRecords {
-			lp.log.CopyTo(logs.AppendEmpty())
-		}
-
-		return consumererror.NewLogs(multierr.Combine(errs...), droppedLogs)
+		errs = deduplicateErrors(errs)
+		se.handleUnauthorizedErrors(ctx, errs...)
+		return consumererror.NewLogs(errors.Join(errs...), ld)
 	}
 
 	return nil
@@ -363,159 +250,108 @@ func (se *sumologicexporter) pushLogsData(ctx context.Context, ld pdata.Logs) er
 // pushMetricsData groups data with common metadata and send them as separate batched requests
 // it returns number of unsent metrics and error which contains list of dropped records
 // so they can be handle by the OTC retry mechanism
-func (se *sumologicexporter) pushMetricsData(ctx context.Context, md pdata.Metrics) error {
-	var (
-		currentMetadata  fields = newFields(pdata.NewAttributeMap())
-		previousMetadata fields = newFields(pdata.NewAttributeMap())
-		errs             []error
-		droppedRecords   []metricPair
-		attributes       pdata.AttributeMap
-	)
-
-	c, err := newCompressor(se.config.CompressEncoding)
-	if err != nil {
-		return consumererror.NewMetrics(fmt.Errorf("failed to initialize compressor: %w", err), md)
-	}
+func (se *sumologicexporter) pushMetricsData(ctx context.Context, md pmetric.Metrics) error {
+	logsUrl, metricsUrl, tracesUrl := se.getDataURLs()
 	sdr := newSender(
+		se.logger,
 		se.config,
-		se.client,
-		se.filter,
-		se.sources,
-		c,
+		se.getHTTPClient(),
 		se.prometheusFormatter,
-		se.graphiteFormatter,
-		se.dataUrlMetrics,
-		se.dataUrlLogs,
-		se.dataUrlTraces,
+		metricsUrl,
+		logsUrl,
+		tracesUrl,
+		se.StickySessionCookie,
+		se.SetStickySessionCookie,
+		se.id,
 	)
 
-	// Iterate over ResourceMetrics
-	rms := md.ResourceMetrics()
-	for i := 0; i < rms.Len(); i++ {
-		rm := rms.At(i)
-
-		attributes = rm.Resource().Attributes()
-		currentMetadata = sdr.filter.filterIn(attributes)
-
-		if se.config.TranslateAttributes {
-			attributes = translateAttributes(attributes)
-			currentMetadata.translateAttributes()
+	var droppedMetrics pmetric.Metrics
+	var errs []error
+	if sdr.config.MetricFormat == OTLPMetricFormat {
+		if err := sdr.sendOTLPMetrics(ctx, md); err != nil {
+			droppedMetrics = md
+			errs = []error{err}
 		}
+	} else {
+		droppedMetrics, errs = sdr.sendNonOTLPMetrics(ctx, md)
+	}
 
-		// iterate over InstrumentationLibraryMetrics
-		ilms := rm.InstrumentationLibraryMetrics()
-		for j := 0; j < ilms.Len(); j++ {
-			ilm := ilms.At(j)
+	if len(errs) > 0 {
+		se.handleUnauthorizedErrors(ctx, errs...)
+		return consumererror.NewMetrics(errors.Join(errs...), droppedMetrics)
+	}
 
-			// iterate over Metrics
-			ms := ilm.Metrics()
-			for k := 0; k < ms.Len(); k++ {
-				m := ms.At(k)
+	return nil
+}
 
-				if se.config.TranslateTelegrafMetrics {
-					translateTelegrafMetric(m)
-				}
-
-				mp := metricPair{
-					metric:     m,
-					attributes: attributes,
-				}
-
-				// If metadata differs from currently buffered, flush the buffer
-				if currentMetadata.string() != previousMetadata.string() && previousMetadata.string() != "" {
-					var dropped []metricPair
-					dropped, err = sdr.sendMetrics(ctx, previousMetadata)
-					if err != nil {
-						errs = append(errs, err)
-						droppedRecords = append(droppedRecords, dropped...)
-					}
-					sdr.cleanMetricBuffer()
-				}
-
-				// assign metadata
-				previousMetadata = currentMetadata
-				var dropped []metricPair
-				// add metric to the buffer
-				dropped, err = sdr.batchMetric(ctx, mp, currentMetadata)
-				if err != nil {
-					droppedRecords = append(droppedRecords, dropped...)
-					errs = append(errs, err)
-				}
+// handleUnauthorizedErrors checks if any of the provided errors is an unauthorized error.
+// In which case it triggers exporter reconfiguration which in turn takes the credentials
+// from sumologicextension which at this point should already detect the problem with
+// authorization (via heartbeats) and prepare new collector credentials to be available.
+func (se *sumologicexporter) handleUnauthorizedErrors(ctx context.Context, errs ...error) {
+	for _, err := range errs {
+		if errors.Is(err, errUnauthorized) {
+			se.logger.Warn("Received unauthorized status code, triggering reconfiguration")
+			if errC := se.configure(ctx); errC != nil {
+				se.logger.Error("Error configuring the exporter with new credentials", zap.Error(err))
+			} else {
+				// It's enough to successfully reconfigure the exporter just once.
+				return
 			}
 		}
 	}
-
-	// Flush pending metrics
-	dropped, err := sdr.sendMetrics(ctx, previousMetadata)
-	if err != nil {
-		droppedRecords = append(droppedRecords, dropped...)
-		errs = append(errs, err)
-	}
-
-	if len(droppedRecords) > 0 {
-		// Move all dropped records to Metrics
-		droppedMetrics := pdata.NewMetrics()
-		rms := droppedMetrics.ResourceMetrics()
-		rms.EnsureCapacity(len(droppedRecords))
-		for _, record := range droppedRecords {
-			rm := droppedMetrics.ResourceMetrics().AppendEmpty()
-			record.attributes.CopyTo(rm.Resource().Attributes())
-
-			ilms := rm.InstrumentationLibraryMetrics()
-			record.metric.CopyTo(ilms.AppendEmpty().Metrics().AppendEmpty())
-		}
-
-		return consumererror.NewMetrics(multierr.Combine(errs...), droppedMetrics)
-	}
-
-	return nil
 }
 
-func (se *sumologicexporter) pushTracesData(ctx context.Context, td pdata.Traces) error {
-	var currentMetadata fields = newFields(pdata.NewAttributeMap())
-	c, err := newCompressor(se.config.CompressEncoding)
-	if err != nil {
-		return consumererror.NewTraces(fmt.Errorf("failed to initialize compressor: %w", err), td)
-	}
+func (se *sumologicexporter) pushTracesData(ctx context.Context, td ptrace.Traces) error {
+	logsUrl, metricsUrl, tracesUrl := se.getDataURLs()
 	sdr := newSender(
+		se.logger,
 		se.config,
-		se.client,
-		se.filter,
-		se.sources,
-		c,
+		se.getHTTPClient(),
 		se.prometheusFormatter,
-		se.graphiteFormatter,
-		se.dataUrlMetrics,
-		se.dataUrlLogs,
-		se.dataUrlTraces,
+		metricsUrl,
+		logsUrl,
+		tracesUrl,
+		se.StickySessionCookie,
+		se.SetStickySessionCookie,
+		se.id,
 	)
-	err = sdr.sendTraces(ctx, td, currentMetadata)
-	if err != nil {
-		return err
-	}
 
-	return nil
+	err := sdr.sendTraces(ctx, td)
+	se.handleUnauthorizedErrors(ctx, err)
+	return err
 }
 
 func (se *sumologicexporter) start(ctx context.Context, host component.Host) error {
+	se.host = host
+	return se.configure(ctx)
+}
+
+func (se *sumologicexporter) configure(ctx context.Context) error {
 	var (
 		ext          *sumologicextension.SumologicExtension
 		foundSumoExt bool
 	)
 
-	httpSettings := se.config.HTTPClientSettings
+	if se.config.CompressEncoding != NoCompression {
+		se.config.ClientConfig.Compression = se.config.CompressEncoding
+	}
 
-	for _, e := range host.GetExtensions() {
+	httpSettings := se.config.ClientConfig
+
+	for _, e := range se.host.GetExtensions() {
 		v, ok := e.(*sumologicextension.SumologicExtension)
 		if ok && httpSettings.Auth.AuthenticatorID == v.ComponentID() {
 			ext = v
 			foundSumoExt = true
+			se.foundSumologicExtension = true
+			se.sumologicExtension = ext
 			break
 		}
 	}
 
 	if httpSettings.Endpoint == "" && httpSettings.Auth != nil &&
-		string(httpSettings.Auth.AuthenticatorID.Type()) == "sumologic" {
+		httpSettings.Auth.AuthenticatorID.Type() == sumologicextension.Type {
 		// If user specified using sumologicextension as auth but none was
 		// found then return an error.
 		if !foundSumoExt {
@@ -535,35 +371,123 @@ func (se *sumologicexporter) start(ctx context.Context, host component.Host) err
 		if err != nil {
 			return fmt.Errorf("failed to parse API base URL from sumologicextension: %w", err)
 		}
-		u.Path = logsDataUrl
-		se.dataUrlLogs = u.String()
-		u.Path = metricsDataUrl
-		se.dataUrlMetrics = u.String()
-		u.Path = tracesDataUrl
-		se.dataUrlTraces = u.String()
+
+		logsUrl := *u
+		logsUrl.Path = logsDataUrl
+		metricsUrl := *u
+		metricsUrl.Path = metricsDataUrl
+		tracesUrl := *u
+		tracesUrl.Path = tracesDataUrl
+		se.setDataURLs(logsUrl.String(), metricsUrl.String(), tracesUrl.String())
+
 	} else if httpSettings.Endpoint != "" {
-		se.dataUrlLogs = httpSettings.Endpoint
-		se.dataUrlMetrics = httpSettings.Endpoint
-		se.dataUrlTraces = httpSettings.Endpoint
+		logsUrl, err := getSignalURL(se.config, httpSettings.Endpoint, component.DataTypeLogs)
+		if err != nil {
+			return err
+		}
+		metricsUrl, err := getSignalURL(se.config, httpSettings.Endpoint, component.DataTypeMetrics)
+		if err != nil {
+			return err
+		}
+		tracesUrl, err := getSignalURL(se.config, httpSettings.Endpoint, component.DataTypeTraces)
+		if err != nil {
+			return err
+		}
+		se.setDataURLs(logsUrl, metricsUrl, tracesUrl)
 
 		// Clean authenticator if set to sumologic.
 		// Setting to null in configuration doesn't work, so we have to force it that way.
-		if httpSettings.Auth != nil && string(httpSettings.Auth.AuthenticatorID.Type()) == "sumologic" {
+		if httpSettings.Auth != nil && httpSettings.Auth.AuthenticatorID.Type() == sumologicextension.Type {
 			httpSettings.Auth = nil
 		}
 	} else {
 		return fmt.Errorf("no auth extension and no endpoint specified")
 	}
 
-	client, err := httpSettings.ToClient(host.GetExtensions())
+	client, err := httpSettings.ToClient(ctx, se.host, component.TelemetrySettings{})
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP Client: %w", err)
 	}
 
-	se.client = client
+	se.setHTTPClient(client)
 	return nil
+}
+
+func (se *sumologicexporter) setHTTPClient(client *http.Client) {
+	se.clientLock.Lock()
+	se.client = client
+	se.clientLock.Unlock()
+}
+
+func (se *sumologicexporter) getHTTPClient() *http.Client {
+	se.clientLock.RLock()
+	defer se.clientLock.RUnlock()
+	return se.client
+}
+
+func (se *sumologicexporter) setDataURLs(logs, metrics, traces string) {
+	se.dataUrlsLock.Lock()
+	se.logger.Info("setting data urls", zap.String("logs_url", logs), zap.String("metrics_url", metrics), zap.String("traces_url", traces))
+	se.dataUrlLogs, se.dataUrlMetrics, se.dataUrlTraces = logs, metrics, traces
+	se.dataUrlsLock.Unlock()
+}
+
+func (se *sumologicexporter) getDataURLs() (logs, metrics, traces string) {
+	se.dataUrlsLock.RLock()
+	defer se.dataUrlsLock.RUnlock()
+	return se.dataUrlLogs, se.dataUrlMetrics, se.dataUrlTraces
 }
 
 func (se *sumologicexporter) shutdown(context.Context) error {
 	return nil
+}
+
+func (se *sumologicexporter) StickySessionCookie() string {
+	if se.foundSumologicExtension {
+		return se.sumologicExtension.StickySessionCookie()
+	} else {
+		se.stickySessionCookieLock.RLock()
+		defer se.stickySessionCookieLock.RUnlock()
+		return se.stickySessionCookie
+	}
+}
+
+func (se *sumologicexporter) SetStickySessionCookie(stickySessionCookie string) {
+	if se.foundSumologicExtension {
+		se.sumologicExtension.SetStickySessionCookie(stickySessionCookie)
+	} else {
+		se.stickySessionCookieLock.Lock()
+		se.stickySessionCookie = stickySessionCookie
+		se.stickySessionCookieLock.Unlock()
+	}
+}
+
+// get the destination url for a given signal type
+// this mostly adds signal-specific suffixes if the format is otlp
+func getSignalURL(oCfg *Config, endpointUrl string, signal component.DataType) (string, error) {
+	url, err := url.Parse(endpointUrl)
+	if err != nil {
+		return "", err
+	}
+
+	switch signal {
+	case component.DataTypeLogs:
+		if oCfg.LogFormat != "otlp" {
+			return url.String(), nil
+		}
+	case component.DataTypeMetrics:
+		if oCfg.MetricFormat != "otlp" {
+			return url.String(), nil
+		}
+	case component.DataTypeTraces:
+	default:
+		return "", fmt.Errorf("unknown signal type: %s", signal)
+	}
+
+	signalUrlSuffix := fmt.Sprintf("/v1/%s", signal)
+	if !strings.HasSuffix(url.Path, signalUrlSuffix) {
+		url.Path = path.Join(url.Path, signalUrlSuffix)
+	}
+
+	return url.String(), nil
 }

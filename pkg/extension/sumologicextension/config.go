@@ -17,25 +17,27 @@ package sumologicextension
 import (
 	"time"
 
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configopaque"
 )
 
 // Config has the configuration for the sumologic extension.
 type Config struct {
-	config.ExtensionSettings `mapstructure:"-"`
 	// squash ensures fields are correctly decoded in embedded struct.
-	confighttp.HTTPClientSettings `mapstructure:",squash"`
+	confighttp.ClientConfig `mapstructure:",squash"`
 
-	// Credentials contains Access Key and Access ID for Sumo Logic service.
-	// Please refer to https://help.sumologic.com/Manage/Security/Access-Keys
-	// for detailed instructions how to obtain them.
-	Credentials credentials `mapstructure:",squash"`
+	// Credentials contains Installation Token for Sumo Logic service.
+	// Please refer to https://help.sumologic.com/docs/manage/security/installation-tokens
+	// for detailed instructions how to obtain the token.
+	Credentials accessCredentials `mapstructure:",squash"`
 
 	// CollectorName is the name under which collector will be registered.
 	// Please note that registering a collector under a name which is already
 	// used is not allowed.
 	CollectorName string `mapstructure:"collector_name"`
+	// CollectorEnvironment is the environment which will be used when updating
+	// the collector metadata.
+	CollectorEnvironment string `mapstructure:"collector_environment"`
 	// CollectorDescription is the description which will be used when the
 	// collector is being registered.
 	CollectorDescription string `mapstructure:"collector_description"`
@@ -44,8 +46,11 @@ type Config struct {
 	CollectorCategory string `mapstructure:"collector_category"`
 	// CollectorFields defines the collector fields.
 	// For more information on this subject visit:
-	// https://help.sumologic.com/Manage/Fields
+	// https://help.sumologic.com/docs/manage/fields
 	CollectorFields map[string]interface{} `mapstructure:"collector_fields"`
+
+	// DiscoverCollectorTags enables collector metadata tag auto-discovery.
+	DiscoverCollectorTags bool `mapstructure:"discover_collector_tags"`
 
 	ApiBaseUrl string `mapstructure:"api_base_url"`
 
@@ -61,6 +66,17 @@ type Config struct {
 	// By default this is false.
 	Clobber bool `mapstructure:"clobber"`
 
+	// ForceRegistration defines whether to force registration every time the
+	// collector starts.
+	// This will cause the collector to not look at the locally stored credentials
+	// and to always reach out to API to register itself.
+	//
+	// NOTE: if clobber is unset (default) then setting this to true will create
+	// a new collector on Sumo UI on every collector start.
+	//
+	// By default this is false.
+	ForceRegistration bool `mapstructure:"force_registration"`
+
 	// Ephemeral defines whether the collector will be deleted after 12 hours
 	// of inactivity.
 	// By default this is false.
@@ -75,11 +91,14 @@ type Config struct {
 	// Exponential algorithm is being used.
 	// Please see following link for details: https://github.com/cenkalti/backoff
 	BackOff backOffConfig `mapstructure:"backoff"`
+
+	// StickySessionEnabled defines if sticky session support is enable.
+	// By default this is false.
+	StickySessionEnabled bool `mapstructure:"sticky_session_enabled"`
 }
 
-type credentials struct {
-	AccessID  string `mapstructure:"access_id"`
-	AccessKey string `mapstructure:"access_key"`
+type accessCredentials struct {
+	InstallationToken configopaque.String `mapstructure:"installation_token"`
 }
 
 // backOff configuration. See following link for details:

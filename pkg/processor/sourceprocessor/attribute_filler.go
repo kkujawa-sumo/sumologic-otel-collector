@@ -19,7 +19,7 @@ import (
 	"regexp"
 	"strings"
 
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
 var (
@@ -28,7 +28,7 @@ var (
 
 func init() {
 	var err error
-	formatRegex, err = regexp.Compile(`\%\{([\w\.]+)\}`)
+	formatRegex, err = regexp.Compile(`\%\{([\w\.\/]+)\}`)
 	if err != nil {
 		panic("failed to parse regex: " + err.Error())
 	}
@@ -69,18 +69,28 @@ func createSourceNameFiller(cfg *Config) attributeFiller {
 	return filler
 }
 
-func (f *attributeFiller) fillResourceOrUseAnnotation(atts *pdata.AttributeMap, annotationKey string) bool {
+func (f *attributeFiller) fillResourceOrUseAnnotation(atts *pcommon.Map, annotationKey string, namespaceAnnotationKey string) bool {
 	val, found := atts.Get(annotationKey)
 	if found {
-		annotationFiller := extractFormat(val.StringVal(), f.name)
-		annotationFiller.dashReplacement = f.dashReplacement
-		annotationFiller.compiledFormat = f.prefix + annotationFiller.compiledFormat
-		return annotationFiller.fillAttributes(atts)
+		return f.useAnnotation(atts, val)
 	}
+
+	val, found = atts.Get(namespaceAnnotationKey)
+	if found {
+		return f.useAnnotation(atts, val)
+	}
+
 	return f.fillAttributes(atts)
 }
 
-func (f *attributeFiller) fillAttributes(atts *pdata.AttributeMap) bool {
+func (f *attributeFiller) useAnnotation(atts *pcommon.Map, annotation pcommon.Value) bool {
+	annotationFiller := extractFormat(annotation.Str(), f.name)
+	annotationFiller.dashReplacement = f.dashReplacement
+	annotationFiller.compiledFormat = f.prefix + annotationFiller.compiledFormat
+	return annotationFiller.fillAttributes(atts)
+}
+
+func (f *attributeFiller) fillAttributes(atts *pcommon.Map) bool {
 	if len(f.compiledFormat) == 0 {
 		return false
 	}
@@ -91,17 +101,17 @@ func (f *attributeFiller) fillAttributes(atts *pdata.AttributeMap) bool {
 		if f.dashReplacement != "" {
 			str = strings.ReplaceAll(str, "-", f.dashReplacement)
 		}
-		atts.UpsertString(f.name, str)
+		atts.PutStr(f.name, str)
 		return true
 	}
 	return false
 }
 
-func (f *attributeFiller) resourceLabelValues(atts *pdata.AttributeMap) []interface{} {
+func (f *attributeFiller) resourceLabelValues(atts *pcommon.Map) []interface{} {
 	arr := make([]interface{}, 0)
 	for _, label := range f.labels {
 		if value, found := atts.Get(label); found {
-			arr = append(arr, value.StringVal())
+			arr = append(arr, value.Str())
 		} else {
 			arr = append(arr, "undefined")
 		}

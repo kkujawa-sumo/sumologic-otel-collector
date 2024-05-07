@@ -16,9 +16,13 @@ package k8sprocessor
 
 import (
 	"context"
+	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/model/pdata"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
@@ -38,6 +42,7 @@ type kubernetesprocessor struct {
 	rules           kube.ExtractionRules
 	filters         kube.Filters
 	podAssociations []kube.Association
+	podIgnore       kube.Excludes
 	delimiter       string
 }
 
@@ -46,7 +51,20 @@ func (kp *kubernetesprocessor) initKubeClient(logger *zap.Logger, kubeClient kub
 		kubeClient = kube.New
 	}
 	if !kp.passthroughMode {
-		kc, err := kubeClient(logger, kp.apiConfig, kp.rules, kp.filters, kp.podAssociations, nil, nil, nil, kp.delimiter)
+		kc, err := kubeClient(
+			logger,
+			kp.apiConfig,
+			kp.rules,
+			kp.filters,
+			kp.podAssociations,
+			kp.podIgnore,
+			nil,
+			nil,
+			nil,
+			kp.delimiter,
+			30*time.Second,
+			kube.DefaultPodDeleteGracePeriod,
+		)
 		if err != nil {
 			return err
 		}
@@ -70,7 +88,7 @@ func (kp *kubernetesprocessor) Shutdown(context.Context) error {
 }
 
 // ProcessTraces process traces and add k8s metadata using resource IP or incoming IP as pod origin.
-func (kp *kubernetesprocessor) ProcessTraces(ctx context.Context, td pdata.Traces) (pdata.Traces, error) {
+func (kp *kubernetesprocessor) ProcessTraces(ctx context.Context, td ptrace.Traces) (ptrace.Traces, error) {
 	rss := td.ResourceSpans()
 	for i := 0; i < rss.Len(); i++ {
 		kp.processResource(ctx, rss.At(i).Resource())
@@ -80,7 +98,7 @@ func (kp *kubernetesprocessor) ProcessTraces(ctx context.Context, td pdata.Trace
 }
 
 // ProcessMetrics process metrics and add k8s metadata using resource IP, hostname or incoming IP as pod origin.
-func (kp *kubernetesprocessor) ProcessMetrics(ctx context.Context, md pdata.Metrics) (pdata.Metrics, error) {
+func (kp *kubernetesprocessor) ProcessMetrics(ctx context.Context, md pmetric.Metrics) (pmetric.Metrics, error) {
 	rm := md.ResourceMetrics()
 	for i := 0; i < rm.Len(); i++ {
 		kp.processResource(ctx, rm.At(i).Resource())
@@ -90,7 +108,7 @@ func (kp *kubernetesprocessor) ProcessMetrics(ctx context.Context, md pdata.Metr
 }
 
 // ProcessLogs process logs and add k8s metadata using resource IP, hostname or incoming IP as pod origin.
-func (kp *kubernetesprocessor) ProcessLogs(ctx context.Context, ld pdata.Logs) (pdata.Logs, error) {
+func (kp *kubernetesprocessor) ProcessLogs(ctx context.Context, ld plog.Logs) (plog.Logs, error) {
 	rl := ld.ResourceLogs()
 	for i := 0; i < rl.Len(); i++ {
 		kp.processResource(ctx, rl.At(i).Resource())
@@ -100,15 +118,19 @@ func (kp *kubernetesprocessor) ProcessLogs(ctx context.Context, ld pdata.Logs) (
 }
 
 // processResource adds Pod metadata tags to resource based on pod association configuration
-func (kp *kubernetesprocessor) processResource(ctx context.Context, resource pdata.Resource) {
-
-	podIdentifierKey, podIdentifierValue := extractPodID(ctx, resource.Attributes(), kp.podAssociations)
-	if podIdentifierValue == "" {
+func (kp *kubernetesprocessor) processResource(ctx context.Context, resource pcommon.Resource) {
+	podIdentifierKey, podIdentifierValue, err := extractPodID(ctx, resource.Attributes(), kp.podAssociations)
+	if err != nil {
+		kp.logger.Debug(
+			"Could not identify pod for given resource",
+			zap.Error(err),
+			zap.Any("resource_attributes", resource.Attributes()),
+		)
 		return
 	}
 
 	if podIdentifierKey != "" {
-		resource.Attributes().InsertString(podIdentifierKey, string(podIdentifierValue))
+		resource.Attributes().PutStr(podIdentifierKey, string(podIdentifierValue))
 	}
 
 	if kp.passthroughMode {
@@ -116,14 +138,15 @@ func (kp *kubernetesprocessor) processResource(ctx context.Context, resource pda
 	}
 	attrsToAdd := kp.getAttributesForPod(podIdentifierValue)
 	for key, val := range attrsToAdd {
-		resource.Attributes().InsertString(key, val)
+		resource.Attributes().PutStr(key, val)
 	}
 }
 
 func (kp *kubernetesprocessor) getAttributesForPod(identifier kube.PodIdentifier) map[string]string {
-	pod, ok := kp.kc.GetPod(identifier)
+	attributes, ok := kp.kc.GetPodAttributes(identifier)
 	if !ok {
+		kp.logger.Debug("No pod with given id found", zap.Any("pod_id", identifier))
 		return nil
 	}
-	return pod.Attributes
+	return attributes
 }
