@@ -1,0 +1,21 @@
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+
+processors:
+  lua:
+    script: "/sumologic/pkg/processor/luaprocessor/examples/script.lua"
+    function: "process"
+
+exporters:
+  logging:
+    logLevel: debug
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [lua]
+      exporters: [logging]

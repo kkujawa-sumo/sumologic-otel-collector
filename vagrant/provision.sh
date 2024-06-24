@@ -6,7 +6,8 @@ sudo apt update -y
 sudo apt install -y \
     make \
     gcc \
-    python3-pip
+    python3-pip \
+    unzip
 
 # Install Go
 curl -LJ "https://golang.org/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o go.linux-amd64.tar.gz \
@@ -82,3 +83,26 @@ add-apt-repository \
    stable"
 apt-get install -y docker-ce docker-ce-cli containerd.io
 usermod -aG docker vagrant
+
+# Install LuaJIT
+wget https://luajit.org/download/LuaJIT-2.1.0-beta3.tar.gz
+tar -xzf LuaJIT-2.1.0-beta3.tar.gz
+cd LuaJIT-2.1.0-beta3/
+make && make install
+cd src
+cp luajit /usr/local/bin/luajit
+cp luajit /usr/local/bin/lua
+cp libluajit.so /usr/local/lib/libluajit.so
+ldconfig
+cd ../../
+
+# Install LuaRocks
+wget https://luarocks.org/releases/luarocks-3.8.0.tar.gz
+tar zxpf luarocks-3.8.0.tar.gz
+cd luarocks-3.8.0
+./configure && make && sudo make install
+cd ../
+
+# Install lua-protobuf
+luarocks install lua-protobuf
+luarocks install serpent
